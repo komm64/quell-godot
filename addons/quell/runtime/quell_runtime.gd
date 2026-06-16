@@ -22,6 +22,10 @@ signal metrics_updated(metrics: Dictionary)
 		_sync_settings()
 
 @export var compositor_analysis_size: Vector2i = Vector2i(256, 144)
+@export_enum("Current frame only", "Temporal blend") var correction_mode: int = 1:
+	set(value):
+		correction_mode = clampi(value, 0, 1)
+		_sync_settings()
 
 var _core: Node
 var last_metrics: Dictionary = {}
@@ -65,6 +69,7 @@ func create_compositor_effect() -> CompositorEffect:
 	effect.viewing_distance_m = viewing_distance_m
 	effect.after_target = headroom_margin
 	effect.analysis_size = compositor_analysis_size
+	effect.correction_mode = correction_mode
 	effect.set_shader_parameters(shader_parameters())
 	return effect
 
@@ -91,6 +96,8 @@ func _sync_settings() -> void:
 	_core.mitigation_enabled = mitigation_enabled
 	_core.viewing_distance_m = viewing_distance_m
 	_core.headroom_margin = headroom_margin
+	if _core.has_method("set_correction_mode"):
+		_core.set_correction_mode(correction_mode)
 
 func _unavailable_metrics(time_seconds: float) -> Dictionary:
 	return {

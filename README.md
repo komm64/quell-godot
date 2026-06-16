@@ -39,6 +39,11 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 - Raw risk from the generated source texture
 - measured After risk from re-analyzing the corrected texture
 - configurable viewing distance and After target
+- selectable correction mode:
+  - Current frame only: adjusts the displayed frame without sampling the
+    previous output frame.
+  - Temporal blend: mixes against the previous corrected frame to limit
+    frame-to-frame luminance changes.
 - HUD graph for Raw, After, and mitigation strength
 - `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
   actual scene color buffer and applies mitigation before display.

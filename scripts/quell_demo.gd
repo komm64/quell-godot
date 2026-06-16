@@ -56,6 +56,7 @@ const MODE_CONFIGS: Array[Dictionary] = [
 var elapsed_seconds := 0.0
 var current_mode := 0
 var mitigation_enabled := true
+var correction_mode := 1
 var viewing_distance_m := 0.60
 var headroom_margin := 0.80
 
@@ -72,6 +73,7 @@ var source_display: TextureRect
 var content_material: ShaderMaterial
 var post_material: ShaderMaterial
 var mode_select: OptionButton
+var correction_mode_select: OptionButton
 var mitigation_toggle: CheckButton
 var distance_value_label: Label
 var headroom_value_label: Label
@@ -265,6 +267,13 @@ func _build_hud() -> void:
 	mitigation_toggle.toggled.connect(_on_mitigation_toggled)
 	stack.add_child(mitigation_toggle)
 
+	correction_mode_select = OptionButton.new()
+	correction_mode_select.add_item("Current frame only")
+	correction_mode_select.add_item("Temporal blend")
+	correction_mode_select.selected = correction_mode
+	correction_mode_select.item_selected.connect(_on_correction_mode_selected)
+	stack.add_child(_with_caption("Correction", correction_mode_select))
+
 	var distance_slider := HSlider.new()
 	distance_slider.min_value = 0.25
 	distance_slider.max_value = 2.00
@@ -375,7 +384,10 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 	var raw_risk: float = float(metrics["raw_risk"])
 	var output_risk: float = float(after_metrics["raw_risk"])
 	var risk_reduction: float = max(0.0, raw_risk - output_risk)
-	analyzer.apply_after_feedback(output_risk, delta)
+	if analyzer.has_method("apply_after_metrics"):
+		analyzer.apply_after_metrics(after_metrics, delta)
+	else:
+		analyzer.apply_after_feedback(output_risk, delta)
 
 	metrics["output_risk"] = output_risk
 	metrics["risk_reduction"] = risk_reduction
@@ -398,8 +410,9 @@ func _update_hud(metrics: Dictionary) -> void:
 
 	var state := "off" if not mitigation_enabled else ("active" if float(metrics["mitigation"]) > 0.01 else "idle")
 	var drop_percent := roundi(float(metrics["reduction_ratio"]) * 100.0)
-	status_label.text = "%s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%%" % [
+	status_label.text = "%s / %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%%" % [
 		state,
+		_correction_mode_name(),
 		String(metrics.get("metric_backend", "generated")),
 		_process_frame_count,
 		_raw_sample_count,
@@ -439,9 +452,17 @@ func _sync_analyzer_settings() -> void:
 	analyzer.viewing_distance_m = viewing_distance_m
 	analyzer.headroom_margin = headroom_margin
 	analyzer.mitigation_enabled = mitigation_enabled
+	if analyzer.has_method("set_correction_mode"):
+		analyzer.set_correction_mode(correction_mode)
+	else:
+		analyzer.correction_mode = correction_mode
 	after_analyzer.viewing_distance_m = viewing_distance_m
 	after_analyzer.headroom_margin = headroom_margin
 	after_analyzer.mitigation_enabled = false
+	if after_analyzer.has_method("set_correction_mode"):
+		after_analyzer.set_correction_mode(correction_mode)
+	else:
+		after_analyzer.correction_mode = correction_mode
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
 
@@ -497,9 +518,14 @@ func _display_size() -> Vector2i:
 func _refresh_static_labels() -> void:
 	distance_value_label.text = "%.2f m" % viewing_distance_m
 	headroom_value_label.text = "%d%%" % roundi(headroom_margin * 100.0)
+	if correction_mode_select != null:
+		correction_mode_select.selected = correction_mode
 	if risk_graph != null:
 		risk_graph.headroom_margin = headroom_margin
 		risk_graph.queue_redraw()
+
+func _correction_mode_name() -> String:
+	return "current" if correction_mode == 0 else "temporal"
 
 func _on_mode_selected(index: int) -> void:
 	_apply_mode(index)
@@ -507,6 +533,21 @@ func _on_mode_selected(index: int) -> void:
 func _on_mitigation_toggled(enabled: bool) -> void:
 	mitigation_enabled = enabled
 	_sync_analyzer_settings()
+
+func _on_correction_mode_selected(index: int) -> void:
+	correction_mode = clampi(index, 0, 1)
+	_sync_analyzer_settings()
+	analyzer.reset()
+	after_analyzer.reset()
+	gpu_analyzer.reset()
+	gpu_after_analyzer.reset()
+	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(MODE_CONFIGS[current_mode]))
+	_process_frame_count = 0
+	_raw_sample_count = 0
+	_after_sample_count = 0
+	if risk_graph != null:
+		risk_graph.reset()
+	_refresh_static_labels()
 
 func _on_viewing_distance_changed(value: float) -> void:
 	viewing_distance_m = value
