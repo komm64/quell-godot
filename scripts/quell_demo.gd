@@ -134,16 +134,13 @@ func _process(delta: float) -> void:
 		source_config["index"] = current_mode
 		gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
 		var raw_gpu_metrics: Dictionary = gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, elapsed_seconds)
-		raw_gpu_metrics["luminance_contrast"] = max(float(raw_gpu_metrics.get("luminance_contrast", 0.0)), _estimate_mode_temporal_contrast(source))
-		if _estimate_mode_temporal_contrast(source) > 0.001:
-			raw_gpu_metrics["general_flash_area"] = max(float(raw_gpu_metrics.get("general_flash_area", 0.0)), float(source.get("unsafe_area", 1.0)))
 		_raw_sample_count += 1
 		metrics = analyzer.update_from_metrics(raw_gpu_metrics, delta, elapsed_seconds)
 		metrics["metric_backend"] = "gpu-rd"
 		shader_parameters = analyzer.shader_parameters(metrics)
 		gpu_frame_pipeline.apply_mitigation(shader_parameters)
 		source_display.texture = gpu_frame_pipeline.after_texture
-		var after_gpu_metrics: Dictionary = raw_gpu_metrics.duplicate(true) if not mitigation_enabled else gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, elapsed_seconds)
+		var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, elapsed_seconds)
 		_after_sample_count += 1
 		var after_metrics: Dictionary = after_analyzer.update_from_metrics(after_gpu_metrics, delta, elapsed_seconds)
 		_apply_measured_after_metrics(metrics, after_metrics, delta)
