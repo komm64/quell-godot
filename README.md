@@ -53,8 +53,10 @@ The public node-facing API is `QuellRuntime`. With private core installed,
 `QuellRuntime.create_compositor_effect()` returns a `CompositorEffect` resource
 that can be inserted into a Godot `Compositor` for real 3D scene rendering. With
 the private core installed, that effect reads the scene color buffer on the GPU,
-computes Raw FPA metrics, updates mitigation strength, applies correction, and
-then measures the corrected frame. The detection, feedback controller, GPU
+downsamples it to a configurable analysis surface, computes Raw FPA metrics,
+updates mitigation strength, applies correction to the full-resolution scene
+color buffer, and then measures the corrected frame through the same reduced
+analysis path. The detection, feedback controller, GPU
 metric reducer, and mitigation compute shaders are private implementation
 details supplied by `quell-core`.
 

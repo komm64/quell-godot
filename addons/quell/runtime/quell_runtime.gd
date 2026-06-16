@@ -21,6 +21,8 @@ signal metrics_updated(metrics: Dictionary)
 		headroom_margin = value
 		_sync_settings()
 
+@export var compositor_analysis_size: Vector2i = Vector2i(256, 144)
+
 var _core: Node
 var last_metrics: Dictionary = {}
 
@@ -62,6 +64,7 @@ func create_compositor_effect() -> CompositorEffect:
 	effect.mitigation_enabled = mitigation_enabled
 	effect.viewing_distance_m = viewing_distance_m
 	effect.after_target = headroom_margin
+	effect.analysis_size = compositor_analysis_size
 	effect.set_shader_parameters(shader_parameters())
 	return effect
 
