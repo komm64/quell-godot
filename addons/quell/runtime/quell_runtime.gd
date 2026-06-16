@@ -2,6 +2,7 @@ class_name QuellRuntime
 extends Node
 
 const CORE_RUNTIME_PATH := "res://addons/quell_core/runtime/quell_core_runtime.gd"
+const CORE_COMPOSITOR_EFFECT_PATH := "res://addons/quell_core/runtime/quell_compositor_effect.gd"
 
 signal metrics_updated(metrics: Dictionary)
 
@@ -50,6 +51,16 @@ func shader_parameters(metrics: Dictionary = {}) -> Dictionary:
 	if not _ensure_core():
 		return {}
 	return _core.shader_parameters(metrics)
+
+func create_compositor_effect() -> CompositorEffect:
+	if not ResourceLoader.exists(CORE_COMPOSITOR_EFFECT_PATH):
+		return null
+	var effect_script = load(CORE_COMPOSITOR_EFFECT_PATH)
+	if effect_script == null:
+		return null
+	var effect: CompositorEffect = effect_script.new()
+	effect.set_shader_parameters(shader_parameters())
+	return effect
 
 func _ensure_core() -> bool:
 	if _core != null:

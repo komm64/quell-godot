@@ -5,6 +5,8 @@ Godot binding and demo project for Quell.
 This repository contains the public Godot addon wrapper:
 
 - `addons/quell` registers the `QuellRuntime` custom node.
+- If the private core is installed, the plugin also registers
+  `QuellCompositorEffect` for 3D renderer compositor integration.
 - `scripts/` and `scenes/` contain the demo UI and risk graph.
 - The proprietary analysis and mitigation implementation is expected at
   `addons/quell_core` during local development or commercial distribution.
@@ -38,6 +40,8 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 - measured After risk from re-analyzing the corrected texture
 - configurable viewing distance and After target
 - HUD graph for Raw, After, and mitigation strength
+- `QuellCompositorEffect`, an optional 3D compositor pass that applies private
+  core mitigation parameters to the actual scene color buffer.
 
 ## Addon Use
 
@@ -45,9 +49,11 @@ Copy `addons/quell` into a Godot project and enable **Project > Project Settings
 > Plugins > Quell**. For a functional commercial build, install the matching
 private `addons/quell_core` package as well.
 
-The public node-facing API is `QuellRuntime`. The detection, feedback controller,
-GPU metric reducer, and mitigation compute shaders are private implementation
-details supplied by `quell-core`.
+The public node-facing API is `QuellRuntime`. With private core installed,
+`QuellRuntime.create_compositor_effect()` returns a `CompositorEffect` resource
+that can be inserted into a Godot `Compositor` for real 3D scene rendering. The
+detection, feedback controller, GPU metric reducer, and mitigation compute
+shaders are private implementation details supplied by `quell-core`.
 
 ## License
 
