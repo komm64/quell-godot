@@ -40,8 +40,8 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 - measured After risk from re-analyzing the corrected texture
 - configurable viewing distance and After target
 - HUD graph for Raw, After, and mitigation strength
-- `QuellCompositorEffect`, an optional 3D compositor pass that applies private
-  core mitigation parameters to the actual scene color buffer.
+- `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
+  actual scene color buffer and applies mitigation before display.
 
 ## Addon Use
 
@@ -51,9 +51,12 @@ private `addons/quell_core` package as well.
 
 The public node-facing API is `QuellRuntime`. With private core installed,
 `QuellRuntime.create_compositor_effect()` returns a `CompositorEffect` resource
-that can be inserted into a Godot `Compositor` for real 3D scene rendering. The
-detection, feedback controller, GPU metric reducer, and mitigation compute
-shaders are private implementation details supplied by `quell-core`.
+that can be inserted into a Godot `Compositor` for real 3D scene rendering. With
+the private core installed, that effect reads the scene color buffer on the GPU,
+computes Raw FPA metrics, updates mitigation strength, applies correction, and
+then measures the corrected frame. The detection, feedback controller, GPU
+metric reducer, and mitigation compute shaders are private implementation
+details supplied by `quell-core`.
 
 ## License
 

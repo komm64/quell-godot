@@ -59,6 +59,9 @@ func create_compositor_effect() -> CompositorEffect:
 	if effect_script == null:
 		return null
 	var effect: CompositorEffect = effect_script.new()
+	effect.mitigation_enabled = mitigation_enabled
+	effect.viewing_distance_m = viewing_distance_m
+	effect.after_target = headroom_margin
 	effect.set_shader_parameters(shader_parameters())
 	return effect
 
