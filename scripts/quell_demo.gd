@@ -476,7 +476,7 @@ func _estimate_mode_risk(config: Dictionary) -> float:
 	var luminance: float = area_risk * float(config.get("flash_amplitude", 0.0)) * analyzer.frequency_gate(float(config.get("flash_hz", 0.0)))
 	var red: float = area_risk * float(config.get("red_amplitude", 0.0)) * analyzer.frequency_gate(float(config.get("red_hz", 0.0)))
 	var stripe_cycles: float = float(config.get("stripe_cycles", 0.0))
-	var spatial: float = float(config.get("spatial_contrast", 0.0)) * clamp((stripe_cycles - 8.0) / 6.0, 0.0, 1.15)
+	var spatial: float = float(config.get("spatial_contrast", 0.0)) * clamp((stripe_cycles - 2.0) / 1.2, 0.0, 1.25)
 	return clamp(max(luminance, max(red, spatial)), 0.0, 1.35)
 
 func _estimate_mode_temporal_contrast(config: Dictionary) -> float:
