@@ -143,7 +143,7 @@ func _process(delta: float) -> void:
 		shader_parameters = analyzer.shader_parameters(metrics)
 		gpu_frame_pipeline.apply_mitigation(shader_parameters)
 		source_display.texture = gpu_frame_pipeline.after_texture
-		var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, elapsed_seconds)
+		var after_gpu_metrics: Dictionary = raw_gpu_metrics.duplicate(true) if not mitigation_enabled else gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, elapsed_seconds)
 		_after_sample_count += 1
 		var after_metrics: Dictionary = after_analyzer.update_from_metrics(after_gpu_metrics, delta, elapsed_seconds)
 		_apply_measured_after_metrics(metrics, after_metrics, delta)
@@ -433,11 +433,16 @@ func _apply_mode(index: int) -> void:
 		content_material.set_shader_parameter("red_hz", float(config["red_hz"]))
 		content_material.set_shader_parameter("stripe_cycles", float(config["stripe_cycles"]))
 		content_material.set_shader_parameter("unsafe_area", float(config["unsafe_area"]))
+	_reset_runtime_state()
+
+func _reset_runtime_state() -> void:
+	if analyzer == null:
+		return
 	analyzer.reset()
 	after_analyzer.reset()
 	gpu_analyzer.reset()
 	gpu_after_analyzer.reset()
-	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(config))
+	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(MODE_CONFIGS[current_mode]) if mitigation_enabled else 0.0)
 	_process_frame_count = 0
 	_raw_sample_count = 0
 	_after_sample_count = 0
@@ -502,14 +507,7 @@ func _ensure_gpu_frame_pipeline_size() -> void:
 		return
 	if gpu_frame_pipeline.configure(display_size, _analysis_size):
 		source_display.texture = gpu_frame_pipeline.after_texture
-		analyzer.reset()
-		after_analyzer.reset()
-		gpu_analyzer.reset()
-		gpu_after_analyzer.reset()
-		analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(MODE_CONFIGS[current_mode]))
-		_process_frame_count = 0
-		_raw_sample_count = 0
-		_after_sample_count = 0
+		_reset_runtime_state()
 
 func _display_size() -> Vector2i:
 	var viewport_size: Vector2 = get_viewport_rect().size
@@ -533,20 +531,12 @@ func _on_mode_selected(index: int) -> void:
 func _on_mitigation_toggled(enabled: bool) -> void:
 	mitigation_enabled = enabled
 	_sync_analyzer_settings()
+	_reset_runtime_state()
 
 func _on_correction_mode_selected(index: int) -> void:
 	correction_mode = clampi(index, 0, 1)
 	_sync_analyzer_settings()
-	analyzer.reset()
-	after_analyzer.reset()
-	gpu_analyzer.reset()
-	gpu_after_analyzer.reset()
-	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(MODE_CONFIGS[current_mode]))
-	_process_frame_count = 0
-	_raw_sample_count = 0
-	_after_sample_count = 0
-	if risk_graph != null:
-		risk_graph.reset()
+	_reset_runtime_state()
 	_refresh_static_labels()
 
 func _on_viewing_distance_changed(value: float) -> void:
