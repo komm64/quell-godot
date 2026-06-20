@@ -8,8 +8,8 @@ This repository contains the public Godot addon wrapper:
 - If the private core is installed, the plugin also registers
   `QuellCompositorEffect` for 3D renderer compositor integration.
 - `scripts/` and `scenes/` contain the demo UI and risk graph.
-- The proprietary analysis and mitigation implementation is expected at
-  `addons/quell_core` during local development or commercial distribution.
+- The analysis and mitigation implementation is expected at `addons/quell_core`
+  during local development.
 
 The private core lives in `komm64/quell-core` and is intentionally not committed
 to this repository.
@@ -51,8 +51,8 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 ## Addon Use
 
 Copy `addons/quell` into a Godot project and enable **Project > Project Settings
-> Plugins > Quell**. For a functional commercial build, install the matching
-private `addons/quell_core` package as well.
+> Plugins > Quell**. To run the analyzer and GPU mitigation path, install the
+matching private `addons/quell_core` package as well.
 
 The public node-facing API is `QuellRuntime`. With private core installed,
 `QuellRuntime.create_compositor_effect()` returns a `CompositorEffect` resource
@@ -62,9 +62,10 @@ downsamples it to a configurable analysis surface, computes Raw FPA metrics,
 updates mitigation strength, applies correction to the full-resolution scene
 color buffer, and then measures the corrected frame through the same reduced
 analysis path. The detection, feedback controller, GPU
-metric reducer, and mitigation compute shaders are private implementation
-details supplied by `quell-core`.
+metric reducer, and mitigation compute shaders are implementation details
+supplied by the private `quell-core` repository.
 
 ## License
 
-TBD for the public wrapper. The core implementation is proprietary.
+TBD for the public wrapper. The core implementation is not exposed in this
+repository.
