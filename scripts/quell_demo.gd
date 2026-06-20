@@ -378,22 +378,8 @@ func _apply_shader_parameters(parameters: Dictionary) -> void:
 		post_material.set_shader_parameter(StringName(key), parameters[key])
 
 func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionary, delta: float) -> void:
-	var raw_risk: float = float(metrics["raw_risk"])
-	var output_risk: float = float(after_metrics["raw_risk"])
-	var risk_reduction: float = max(0.0, raw_risk - output_risk)
-	if analyzer.has_method("apply_after_metrics"):
-		analyzer.apply_after_metrics(after_metrics, delta)
-	else:
-		analyzer.apply_after_feedback(output_risk, delta)
-
-	metrics["output_risk"] = output_risk
-	metrics["risk_reduction"] = risk_reduction
-	metrics["reduction_ratio"] = risk_reduction / max(raw_risk, 0.001)
+	analyzer.combine_after_metrics(metrics, after_metrics, delta)
 	metrics["next_mitigation"] = analyzer.mitigation_strength
-	metrics["after_general_flash_count"] = after_metrics.get("general_flash_count", 0)
-	metrics["after_red_flash_count"] = after_metrics.get("red_flash_count", 0)
-	metrics["after_general_flash_area"] = after_metrics.get("general_flash_area", 0.0)
-	metrics["after_red_flash_area"] = after_metrics.get("red_flash_area", 0.0)
 
 func _update_hud(metrics: Dictionary) -> void:
 	risk_graph.add_sample(elapsed_seconds, metrics)

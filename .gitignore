@@ -1,5 +1,6 @@
 .godot/
 addons/quell_core/
+CLAUDE.md
 *.log
 *.tmp
 *.uid
