@@ -4,7 +4,7 @@ const SAMPLE_SECONDS: float = 8.0
 const GRAPH_SAMPLE_HZ: float = 120.0
 const GRAPH_DT: float = 1.0 / GRAPH_SAMPLE_HZ
 const MAX_SAMPLES: int = int(SAMPLE_SECONDS * GRAPH_SAMPLE_HZ)
-const GRAPH_SMOOTH_RATE: float = 18.0
+const RISK_GRAPH_MAX: float = 1.35
 const PADDING_LEFT: float = 34.0
 const PADDING_TOP: float = 12.0
 const PADDING_RIGHT: float = 10.0
@@ -15,11 +15,6 @@ const MITIGATION_TRACK_HEIGHT: float = 34.0
 var headroom_margin: float = 0.80
 var samples: Array[Dictionary] = []
 var _next_graph_sample_time: float = -1.0
-var _last_input_time: float = -1.0
-var _has_display_values: bool = false
-var _display_raw: float = 0.0
-var _display_output: float = 0.0
-var _display_mitigation: float = 0.0
 
 func _ready() -> void:
 	custom_minimum_size = Vector2(360.0, 178.0)
@@ -28,11 +23,6 @@ func _ready() -> void:
 func reset() -> void:
 	samples.clear()
 	_next_graph_sample_time = -1.0
-	_last_input_time = -1.0
-	_has_display_values = false
-	_display_raw = 0.0
-	_display_output = 0.0
-	_display_mitigation = 0.0
 	queue_redraw()
 
 func add_sample(time_seconds: float, metrics: Dictionary) -> void:
@@ -40,24 +30,11 @@ func add_sample(time_seconds: float, metrics: Dictionary) -> void:
 	var output: float = float(metrics.get("output_risk", 0.0))
 	var mitigation: float = float(metrics.get("mitigation", 0.0))
 
-	if not _has_display_values:
-		_display_raw = raw
-		_display_output = output
-		_display_mitigation = mitigation
-		_has_display_values = true
-	else:
-		var dt: float = max(0.0, time_seconds - _last_input_time)
-		var alpha: float = 1.0 - exp(-dt * GRAPH_SMOOTH_RATE)
-		_display_raw = lerpf(_display_raw, raw, alpha)
-		_display_output = lerpf(_display_output, output, alpha)
-		_display_mitigation = lerpf(_display_mitigation, mitigation, alpha)
-	_last_input_time = time_seconds
-
 	var sample := {
 		"time": time_seconds,
-		"raw": _display_raw,
-		"output": _display_output,
-		"mitigation": _display_mitigation,
+		"raw": raw,
+		"output": output,
+		"mitigation": mitigation,
 	}
 
 	if _next_graph_sample_time < 0.0:
@@ -95,13 +72,13 @@ func _draw() -> void:
 	)
 
 	_draw_grid(risk_plot, true)
-	_draw_threshold_line(risk_plot, 1.0, Color(0.82, 0.88, 0.90, 0.72))
-	_draw_threshold_line(risk_plot, headroom_margin, Color(0.93, 0.78, 0.32, 0.74))
-	_draw_series(risk_plot, "output", Color(0.37, 0.82, 0.62), 4.2)
-	_draw_series(risk_plot, "raw", Color(1.00, 0.55, 0.25), 2.0)
+	_draw_threshold_line(risk_plot, 1.0, Color(0.82, 0.88, 0.90, 0.72), RISK_GRAPH_MAX)
+	_draw_threshold_line(risk_plot, headroom_margin, Color(0.93, 0.78, 0.32, 0.74), RISK_GRAPH_MAX)
+	_draw_series(risk_plot, "output", Color(0.37, 0.82, 0.62), 4.2, RISK_GRAPH_MAX)
+	_draw_series(risk_plot, "raw", Color(1.00, 0.55, 0.25), 2.0, RISK_GRAPH_MAX)
 
 	_draw_grid(mitigation_plot, false)
-	_draw_series(mitigation_plot, "mitigation", Color(0.44, 0.66, 0.96), 2.2)
+	_draw_series(mitigation_plot, "mitigation", Color(0.44, 0.66, 0.96), 2.2, 1.0)
 	_draw_track_labels(risk_plot, mitigation_plot)
 	_draw_legend()
 
@@ -117,17 +94,17 @@ func _draw_grid(plot: Rect2, show_left_values: bool) -> void:
 		draw_line(Vector2(x, plot.position.y), Vector2(x, plot.position.y + plot.size.y), Color(0.25, 0.31, 0.34, 0.22), 1.0)
 
 	if show_left_values:
-		draw_string(get_theme_default_font(), Vector2(5.0, plot.position.y + 4.0), "100", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, Color(0.66, 0.72, 0.75))
+		draw_string(get_theme_default_font(), Vector2(5.0, plot.position.y + 4.0), "%d" % roundi(RISK_GRAPH_MAX * 100.0), HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, Color(0.66, 0.72, 0.75))
 		draw_string(get_theme_default_font(), Vector2(12.0, plot.position.y + plot.size.y), "0", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, Color(0.66, 0.72, 0.75))
 	else:
 		draw_string(get_theme_default_font(), Vector2(7.0, plot.position.y + 4.0), "M100", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(0.66, 0.72, 0.75))
 		draw_string(get_theme_default_font(), Vector2(19.0, plot.position.y + plot.size.y), "0", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(0.66, 0.72, 0.75))
 
-func _draw_threshold_line(plot: Rect2, value: float, color: Color) -> void:
-	var y: float = _value_to_y(plot, value)
+func _draw_threshold_line(plot: Rect2, value: float, color: Color, max_value: float) -> void:
+	var y: float = _value_to_y(plot, value, max_value)
 	draw_line(Vector2(plot.position.x, y), Vector2(plot.position.x + plot.size.x, y), color, 1.5)
 
-func _draw_series(plot: Rect2, key: String, color: Color, width: float) -> void:
+func _draw_series(plot: Rect2, key: String, color: Color, width: float, max_value: float) -> void:
 	if samples.size() < 2:
 		return
 
@@ -140,7 +117,7 @@ func _draw_series(plot: Rect2, key: String, color: Color, width: float) -> void:
 		var t: float = float(i) / float(max(1, draw_count - 1))
 		var sample_position: float = lerpf(first_sample, last_sample, t)
 		var x: float = plot.position.x + plot.size.x * t
-		var y: float = _value_to_y(plot, _interpolated_value(key, sample_position))
+		var y: float = _value_to_y(plot, _interpolated_value(key, sample_position), max_value)
 		points.append(Vector2(x, y))
 
 	draw_polyline(points, color, width, true)
@@ -169,5 +146,5 @@ func _draw_legend_item(origin: Vector2, label: String, color: Color) -> void:
 	draw_line(origin + Vector2(0.0, -4.0), origin + Vector2(18.0, -4.0), color, 2.0)
 	draw_string(get_theme_default_font(), origin + Vector2(24.0, 0.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, Color(0.77, 0.84, 0.86))
 
-func _value_to_y(plot: Rect2, value: float) -> float:
-	return plot.position.y + plot.size.y * (1.0 - clamp(value, 0.0, 1.0))
+func _value_to_y(plot: Rect2, value: float, max_value: float) -> float:
+	return plot.position.y + plot.size.y * (1.0 - clamp(value / max(max_value, 0.001), 0.0, 1.0))

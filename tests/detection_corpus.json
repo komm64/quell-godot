@@ -1,0 +1,216 @@
+{
+  "schema": "quell-detection-corpus-v1",
+  "defaults": {
+    "fps": 60.0,
+    "frames": 120,
+    "width": 96,
+    "height": 48
+  },
+  "cases": [
+    {
+      "id": "safe_static_gray",
+      "group": "safe",
+      "kind": "static",
+      "metric": "raw_risk",
+      "expect": "lt",
+      "threshold": 1.0,
+      "color": [0.5, 0.5, 0.5]
+    },
+    {
+      "id": "luminance_three_or_fewer_per_second",
+      "group": "luminance",
+      "kind": "flash",
+      "metric": "luminance",
+      "expect": "lt",
+      "threshold": 1.0,
+      "interval_frames": 10,
+      "bright": [1.0, 1.0, 1.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "full"
+    },
+    {
+      "id": "luminance_more_than_three_per_second",
+      "group": "luminance",
+      "kind": "flash",
+      "metric": "luminance",
+      "expect": "gte",
+      "threshold": 1.0,
+      "interval_frames": 7,
+      "bright": [1.0, 1.0, 1.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "full"
+    },
+    {
+      "id": "luminance_small_area_fast_flash",
+      "group": "luminance",
+      "kind": "flash",
+      "metric": "luminance",
+      "expect": "lt",
+      "threshold": 1.0,
+      "interval_frames": 4,
+      "bright": [1.0, 1.0, 1.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "block",
+      "block": [8, 8]
+    },
+    {
+      "id": "luminance_quarter_area_fast_flash",
+      "group": "luminance",
+      "kind": "flash",
+      "metric": "luminance",
+      "expect": "gte",
+      "threshold": 1.0,
+      "interval_frames": 4,
+      "bright": [1.0, 1.0, 1.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "block",
+      "block": [48, 24]
+    },
+    {
+      "id": "red_saturated_fast_flash",
+      "group": "red",
+      "kind": "flash",
+      "metric": "red",
+      "expect": "gte",
+      "threshold": 1.0,
+      "interval_frames": 4,
+      "bright": [1.0, 0.0, 0.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "full"
+    },
+    {
+      "id": "red_desaturated_fast_flash",
+      "group": "red",
+      "kind": "flash",
+      "metric": "red",
+      "expect": "lt",
+      "threshold": 1.0,
+      "interval_frames": 4,
+      "bright": [1.0, 0.6, 0.6],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "full"
+    },
+    {
+      "id": "red_small_area_fast_flash",
+      "group": "red",
+      "kind": "flash",
+      "metric": "red",
+      "expect": "lt",
+      "threshold": 1.0,
+      "interval_frames": 4,
+      "bright": [1.0, 0.0, 0.0],
+      "dark": [0.0, 0.0, 0.0],
+      "area": "block",
+      "block": [8, 8]
+    },
+    {
+      "id": "spatial_vertical_four_pairs",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "lt",
+      "threshold": 1.0,
+      "cycles": 4,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_vertical_five_pairs",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "lt",
+      "threshold": 1.0,
+      "cycles": 5,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_vertical_six_pairs",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "gte",
+      "threshold": 1.0,
+      "cycles": 6,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_vertical_high_density",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "gte",
+      "threshold": 1.0,
+      "cycles": 14,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_horizontal_high_density",
+      "group": "spatial",
+      "kind": "horizontal_stripes",
+      "metric": "spatial",
+      "expect": "gte",
+      "threshold": 1.0,
+      "cycles": 8,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_diagonal_high_density",
+      "group": "spatial",
+      "kind": "diagonal_stripes",
+      "metric": "spatial",
+      "expect": "gte",
+      "threshold": 1.0,
+      "cycles": 10,
+      "low": 0.0,
+      "high": 1.0
+    },
+    {
+      "id": "spatial_low_contrast_high_density",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "lt",
+      "threshold": 1.0,
+      "cycles": 14,
+      "low": 0.45,
+      "high": 0.52
+    },
+    {
+      "id": "spatial_single_large_edge",
+      "group": "spatial",
+      "kind": "half_split",
+      "metric": "spatial",
+      "expect": "lt",
+      "threshold": 1.0
+    },
+    {
+      "id": "spatial_partial_area_below_threshold",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "lt",
+      "threshold": 1.0,
+      "cycles": 14,
+      "low": 0.0,
+      "high": 1.0,
+      "stripe_area_rows": 5
+    },
+    {
+      "id": "spatial_partial_area_above_threshold",
+      "group": "spatial",
+      "kind": "vertical_stripes",
+      "metric": "spatial",
+      "expect": "gte",
+      "threshold": 1.0,
+      "cycles": 14,
+      "low": 0.0,
+      "high": 1.0,
+      "stripe_area_rows": 18
+    }
+  ]
+}

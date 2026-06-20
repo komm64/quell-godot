@@ -4,3 +4,5 @@ CLAUDE.md
 *.log
 *.tmp
 *.uid
+validation/private/
+shaders/quell_mitigator.gdshader

@@ -22,9 +22,9 @@ signal metrics_updated(metrics: Dictionary)
 		_sync_settings()
 
 @export var compositor_analysis_size: Vector2i = Vector2i(256, 144)
-@export_enum("Current frame only", "Temporal blend") var correction_mode: int = 1:
+@export_enum("Current frame only", "Temporal blend", "Adaptive") var correction_mode: int = 2:
 	set(value):
-		correction_mode = clampi(value, 0, 1)
+		correction_mode = clampi(value, 0, 2)
 		_sync_settings()
 
 var _core: Node
