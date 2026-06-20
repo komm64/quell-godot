@@ -470,7 +470,6 @@ func _process(delta: float) -> void:
 				raw_gpu_metrics["general_flash_area"] = max(float(raw_gpu_metrics.get("general_flash_area", 0.0)), float(source.get("unsafe_area", 1.0)))
 		else:
 			raw_gpu_metrics["source_kind"] = "frame_sequence"
-			_apply_cpu_spatial_override(raw_gpu_metrics, gpu_sequence_image, analyzer)
 		metrics = analyzer.update_from_metrics(raw_gpu_metrics, delta, elapsed_seconds)
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		shader_parameters = analyzer.shader_parameters(metrics)
@@ -997,23 +996,14 @@ func _load_frame_sequence_image(config: Dictionary, time_seconds: float):
 		_frame_cache.erase(evicted_path)
 	return image
 
-func _measure_after_for_source(source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
+# Realtime demo uses the GPU spatial metric for all sources. The per-frame CPU
+# spatial override (get_image() readback + full-image analyze_spatial_image) was
+# an offline-validation accuracy aid and is too heavy for live frame sequences;
+# that fidelity path lives in the monorepo validation harness, not here.
+func _measure_after_for_source(_source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
 	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after"
-	if _is_frame_sequence_source(source) and gpu_frame_pipeline.analysis_after_texture != null:
-		var after_image: Image = gpu_frame_pipeline.analysis_after_texture.get_image()
-		_apply_cpu_spatial_override(after_gpu_metrics, after_image, after_analyzer)
 	return after_analyzer.update_from_metrics(after_gpu_metrics, delta, time_seconds)
-
-func _apply_cpu_spatial_override(metrics: Dictionary, image: Image, spatial_analyzer) -> void:
-	if image == null or image.is_empty() or spatial_analyzer == null:
-		return
-	var spatial_metrics: Dictionary = spatial_analyzer.analyze_spatial_image(image)
-	metrics["spatial"] = clamp(float(spatial_metrics.get("risk", 0.0)), 0.0, 1.35)
-	metrics["spatial_pattern_area"] = float(spatial_metrics.get("area", 0.0))
-	metrics["spatial_pattern_pairs"] = float(spatial_metrics.get("pairs", 0.0))
-	metrics["spatial_pattern_regularity"] = float(spatial_metrics.get("regularity", 0.0))
-	metrics["spatial_backend"] = "cpu-regularity"
 
 func _load_comparator_baselines() -> void:
 	var text: String = FileAccess.get_file_as_string("res://tests/detection_corpus.json")
