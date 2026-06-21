@@ -474,7 +474,8 @@ func _process(delta: float) -> void:
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		shader_parameters = analyzer.shader_parameters(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
-		gpu_frame_pipeline.apply_mitigation(shader_parameters)
+		var hazard_map_rid: RID = gpu_analyzer.hazard_map_texture.texture_rd_rid if gpu_analyzer.hazard_map_texture != null else RID()
+		gpu_frame_pipeline.apply_mitigation(shader_parameters, hazard_map_rid)
 		source_display.texture = gpu_frame_pipeline.after_texture
 		_after_sample_count += 1
 		var after_metrics: Dictionary = metrics.duplicate(true) if not mitigation_enabled else _measure_after_for_source(source, elapsed_seconds, delta)
