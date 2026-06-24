@@ -1,7 +1,7 @@
 extends Control
 
 const SAMPLE_SECONDS: float = 8.0
-const GRAPH_SAMPLE_HZ: float = 120.0
+const GRAPH_SAMPLE_HZ: float = 30.0
 const GRAPH_DT: float = 1.0 / GRAPH_SAMPLE_HZ
 const MAX_SAMPLES: int = int(SAMPLE_SECONDS * GRAPH_SAMPLE_HZ)
 const RISK_GRAPH_MAX: float = 1.35
@@ -40,16 +40,19 @@ func add_sample(time_seconds: float, metrics: Dictionary) -> void:
 	if _next_graph_sample_time < 0.0:
 		_next_graph_sample_time = time_seconds
 
+	var appended := false
 	while time_seconds + 0.0001 >= _next_graph_sample_time:
 		var fixed_sample := sample.duplicate(true)
 		fixed_sample["time"] = _next_graph_sample_time
 		samples.append(fixed_sample)
 		_next_graph_sample_time += GRAPH_DT
+		appended = true
 
 	while samples.size() > MAX_SAMPLES:
 		samples.pop_front()
 
-	queue_redraw()
+	if appended:
+		queue_redraw()
 
 func get_sample_count() -> int:
 	return samples.size()

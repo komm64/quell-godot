@@ -1,7 +1,5 @@
 extends Control
 
-# Public wrapper discovers the proprietary core at runtime so the demo degrades
-# gracefully (notice instead of crash) when addons/quell_core is absent.
 const CORE_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_analyzer.gd"
 const CORE_GPU_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_gpu_analyzer.gd"
 const CORE_GPU_FRAME_PIPELINE_PATH := "res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd"
@@ -82,17 +80,21 @@ const PRIVATE_FRAME_SEQUENCE_SOURCES: Array[Dictionary] = [
 ]
 
 const FRAME_CACHE_LIMIT: int = 384
+const ANALYSIS_SCALE_DIVISOR: int = 4
+const ENABLE_K64_IO_BY_DEFAULT: bool = false
+const ENABLE_FRAME_SEQUENCE_RAW_SPATIAL_CPU_OVERRIDE: bool = false
+const ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK: bool = false
+const HUD_UPDATE_HZ: float = 10.0
 var elapsed_seconds := 0.0
 var current_mode := 0
 var mitigation_enabled := true
-# mitigation_mode / spatial_sensitivity hold core enum ints; real defaults are
-# assigned in _ready() once the core classes are loaded.
 var mitigation_mode := 0
 var temporal_blend_alpha := 0.50
 var max_contrast_compression := 0.65
 var max_brightness_reduction := 0.50
 var max_feedback_amount := 0.60
 var local_correction_enabled := true
+var preserve_source_hue := true
 var current_frame_solver_enabled := true
 var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
@@ -103,17 +105,17 @@ var analyzer
 var after_analyzer
 var gpu_analyzer
 var gpu_after_analyzer
-var gpu_frame_pipeline
 var current_frame_solver
+var gpu_frame_pipeline
 var source_viewport: SubViewport
 var source_display: TextureRect
 var content_material: ShaderMaterial
-var post_material: ShaderMaterial
 var mode_select: OptionButton
 var mitigation_mode_select: OptionButton
 var spatial_sensitivity_select: OptionButton
 var mitigation_toggle: CheckButton
 var local_correction_toggle: CheckButton
+var hue_preserve_toggle: CheckButton
 var current_frame_solver_toggle: CheckButton
 var distance_value_label: Label
 var headroom_value_label: Label
@@ -124,41 +126,51 @@ var brightness_limit_slider: HSlider
 var brightness_limit_value_label: Label
 var feedback_limit_slider: HSlider
 var feedback_limit_value_label: Label
+var debug_panel: Control
 var status_label: Label
 var risk_graph: Control
 var metric_labels: Dictionary = {}
 var metric_bars: Dictionary = {}
 var contribution_toggles: Dictionary = {}
-var _analysis_size := Vector2i(256, 144)
-# The mitigator is cheap per-pixel, so it runs at full display resolution (sharp).
-# A reduced-buffer optimization for 4K/target-spec should composite a low-res
-# CORRECTION onto the full-res source, not downscale the whole image. _source_aspect
-# 0.0 = use the window aspect.
-const DISPLAY_BUFFER_DIVISOR := 1
-var _source_aspect: float = 0.0
 var _process_frame_count: int = 0
 var _raw_sample_count: int = 0
 var _after_sample_count: int = 0
-var _last_runtime_metrics: Dictionary = {}
-var _last_shader_parameters: Dictionary = {}
 var _comparator_cases: Dictionary = {}
 var _mode_configs: Array[Dictionary] = []
 var _frame_sequence_paths: Dictionary = {}
 var _frame_cache: Dictionary = {}
 var _frame_cache_order: Array[String] = []
+var _frame_sequence_active_id := ""
+var _frame_sequence_index := 0
+var _frame_sequence_accumulator := 0.0
+var _frame_sequence_frame_changed := false
+var _frame_sequence_pending_analysis_delta := 0.0
+var _last_frame_sequence_metrics: Dictionary = {}
+var _last_runtime_metrics: Dictionary = {}
+var _last_after_metrics: Dictionary = {}
+var _last_shader_parameters: Dictionary = {}
+var _next_hud_update_time: float = 0.0
+var _profile_enabled: bool = false
+var _profile_accum: Dictionary = {}
+var _profile_next_report: float = 0.0
 
 func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
-	get_window().title = "Quell Godot Prototype"
+	Engine.max_fps = 60
+	get_window().title = "[quell-godot] Godot Prototype"
 	if not _load_core_classes():
-		_build_notice("Quell private core is not installed.\nPlace quell-core/engines/godot/addons/quell_core at res://addons/quell_core.")
+		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
 		return
+	_profile_enabled = _cmdline_has_flag("--quell-profile")
+	current_frame_solver_enabled = not (_cmdline_has_flag("--quell-no-solver") or _cmdline_has_flag("--quell-no-current-frame-solver"))
+	if _cmdline_has_flag("--quell-solver") or _cmdline_has_flag("--quell-current-frame-solver"):
+		current_frame_solver_enabled = true
 	analyzer = QuellAnalyzerClass.new()
 	after_analyzer = QuellAnalyzerClass.new()
 	gpu_analyzer = GpuAnalyzerClass.new()
 	gpu_after_analyzer = GpuAnalyzerClass.new()
-	gpu_frame_pipeline = GpuFramePipelineClass.new()
 	current_frame_solver = CurrentFrameSolverClass.new()
+	gpu_frame_pipeline = GpuFramePipelineClass.new()
 	mitigation_mode = QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY
 	spatial_sensitivity = QuellAnalyzerClass.SpatialSensitivity.BALANCED
 	contribution_enabled = _default_contribution_enabled()
@@ -168,14 +180,7 @@ func _ready() -> void:
 	_sync_analyzer_settings()
 	_build_visual_layers()
 	_build_hud()
-	_apply_mode(0)
-	if OS.get_environment("QUELL_CLIP") != "":
-		for i in range(_mode_configs.size()):
-			if _is_frame_sequence_source(_mode_configs[i]):
-				_apply_mode(i)
-				break
-	if OS.get_environment("QUELL_WIN_W") != "" and OS.get_environment("QUELL_WIN_H") != "":
-		DisplayServer.window_set_size(Vector2i(int(OS.get_environment("QUELL_WIN_W")), int(OS.get_environment("QUELL_WIN_H"))))
+	_apply_mode(_initial_mode_index())
 	_start_k64_io()
 
 func _load_core_classes() -> bool:
@@ -221,8 +226,34 @@ func _exit_tree() -> void:
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.dispose()
 
+func _input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var key_event := event as InputEventKey
+	if not key_event.pressed or key_event.echo:
+		return
+	if key_event.ctrl_pressed or key_event.alt_pressed or key_event.meta_pressed:
+		return
+	var keycode := key_event.physical_keycode if key_event.physical_keycode != KEY_NONE else key_event.keycode
+	if keycode == KEY_SPACE:
+		_on_restart_video_pressed()
+		get_viewport().set_input_as_handled()
+	elif keycode == KEY_R:
+		_on_clear_history_pressed()
+		get_viewport().set_input_as_handled()
+	elif keycode == KEY_F1:
+		if debug_panel != null:
+			debug_panel.visible = not debug_panel.visible
+		get_viewport().set_input_as_handled()
+	elif keycode == KEY_F2:
+		if risk_graph != null:
+			risk_graph.visible = not risk_graph.visible
+		get_viewport().set_input_as_handled()
+
 func _start_k64_io() -> void:
 	if not OS.is_debug_build():
+		return
+	if not _k64_io_enabled():
 		return
 	var io := get_node_or_null("/root/K64IO")
 	if io == null:
@@ -245,8 +276,12 @@ func _start_k64_io() -> void:
 			{"name": "max_brightness_reduction", "type": "float", "doc": "maximum brightness reduction slider"},
 			{"name": "max_feedback_amount", "type": "float", "doc": "maximum temporal feedback slider"},
 			{"name": "local_correction_enabled", "type": "bool", "doc": "local correction toggle"},
+			{"name": "preserve_source_hue", "type": "bool", "doc": "Raw hue reconstruction toggle"},
 			{"name": "current_frame_solver_enabled", "type": "bool", "doc": "CurrentFrame preview solver toggle"},
 			{"name": "spatial_sensitivity", "type": "int", "doc": "QuellAnalyzer.SpatialSensitivity enum value"},
+			{"name": "render_backend", "type": "string", "doc": "active Quell output backend"},
+			{"name": "display_size", "type": "string", "doc": "current output texture size"},
+			{"name": "analysis_size", "type": "string", "doc": "current reduced analysis/mask texture size"},
 			{"name": "frame", "type": "int", "doc": "demo _process frame counter"},
 		],
 	})
@@ -279,8 +314,17 @@ func _start_k64_io() -> void:
 	io.call("register_action", "quell_set_local_correction", Callable(self, "_act_k64_set_local_correction"), {
 		"args": [{"name": "enabled", "type": "bool"}],
 	})
+	io.call("register_action", "quell_set_hue_preserve", Callable(self, "_act_k64_set_hue_preserve"), {
+		"args": [{"name": "enabled", "type": "bool"}],
+	})
 	io.call("register_action", "quell_set_current_frame_solver", Callable(self, "_act_k64_set_current_frame_solver"), {
 		"args": [{"name": "enabled", "type": "bool"}],
+	})
+	io.call("register_action", "quell_restart_video", Callable(self, "_act_k64_restart_video"), {
+		"args": [],
+	})
+	io.call("register_action", "quell_clear_history", Callable(self, "_act_k64_clear_history"), {
+		"args": [],
 	})
 	io.call("register_action", "quell_set_spatial_sensitivity", Callable(self, "_act_k64_set_spatial_sensitivity"), {
 		"args": [{"name": "mode", "type": "int"}],
@@ -294,8 +338,80 @@ func _start_k64_io() -> void:
 	var ok: Variant = io.call("start")
 	print("[quell] K64IO.start() -> ", ok, "  bus at: user://k64_io/")
 
+func _k64_io_enabled() -> bool:
+	if ENABLE_K64_IO_BY_DEFAULT:
+		return true
+	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		if arg == "--k64-io" or arg == "--quell-k64-io":
+			return true
+	return false
+
+func _cmdline_has_flag(flag: String) -> bool:
+	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		if arg == flag:
+			return true
+	return false
+
+func _profile_add(key: String, usec: int) -> void:
+	if not _profile_enabled:
+		return
+	_profile_accum[key] = int(_profile_accum.get(key, 0)) + usec
+
+func _profile_sample() -> void:
+	if not _profile_enabled:
+		return
+	_profile_accum["samples"] = int(_profile_accum.get("samples", 0)) + 1
+	if elapsed_seconds < _profile_next_report:
+		return
+	_profile_next_report = elapsed_seconds + 2.0
+	var samples: int = max(1, int(_profile_accum.get("samples", 1)))
+	var total_us := int(_profile_accum.get("total_us", 0))
+	var tracked_us := 0
+	for key in ["setup_us", "ready_us", "ensure_us", "load_us", "cache_us", "texture_us", "analyze_us", "controller_us", "shader_us", "feedback_us", "store_us", "hud_us"]:
+		tracked_us += int(_profile_accum.get(key, 0))
+	print("[quell-profile] gpu %s pipeline_ready %s analyzer_ready %s texture %s setup %.2fms ready %.2fms ensure %.2fms load %.2fms cache %.2fms texture %.2fms analyze %.2fms controller %.2fms shader %.2fms feedback %.2fms store %.2fms hud %.2fms other %.2fms total %.2fms samples %d" % [
+		str(_has_gpu_frame_pipeline()),
+		str(gpu_frame_pipeline != null and gpu_frame_pipeline.is_ready()),
+		str(gpu_analyzer != null and gpu_analyzer.is_ready()),
+		str(gpu_frame_pipeline != null and gpu_frame_pipeline.analysis_source_texture != null),
+		float(_profile_accum.get("setup_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("ready_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("ensure_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("load_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("cache_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("texture_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("analyze_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("controller_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("shader_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("feedback_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("store_us", 0)) / float(samples) / 1000.0,
+		float(_profile_accum.get("hud_us", 0)) / float(samples) / 1000.0,
+		float(max(0, total_us - tracked_us)) / float(samples) / 1000.0,
+		float(_profile_accum.get("total_us", 0)) / float(samples) / 1000.0,
+		samples,
+	])
+	_profile_accum.clear()
+
+func _initial_mode_index() -> int:
+	if OS.get_environment("QUELL_CLIP") != "":
+		for i in range(_mode_configs.size()):
+			if _is_frame_sequence_source(_mode_configs[i]):
+				return i
+	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		if arg.begins_with("--quell-mode="):
+			return clampi(int(arg.get_slice("=", 1)), 0, max(0, _mode_configs.size() - 1))
+		if arg.begins_with("--quell-source="):
+			var requested := arg.get_slice("=", 1)
+			for i in range(_mode_configs.size()):
+				var config: Dictionary = _mode_configs[i]
+				if requested == String(config.get("id", "")) or requested == String(config.get("name", "")):
+					return i
+	return 0
+
 func _provide_k64_status() -> Dictionary:
 	var source := _current_source_config()
+	var display_size := _display_size()
+	var analysis_size := _analysis_size_for_display(display_size)
 	return {
 		"source": String(source.get("name", "")),
 		"mitigation_enabled": mitigation_enabled,
@@ -306,14 +422,23 @@ func _provide_k64_status() -> Dictionary:
 		"max_brightness_reduction": max_brightness_reduction,
 		"max_feedback_amount": max_feedback_amount,
 		"local_correction_enabled": local_correction_enabled,
+		"preserve_source_hue": preserve_source_hue,
 		"current_frame_solver_enabled": current_frame_solver_enabled,
 		"spatial_sensitivity": int(spatial_sensitivity),
+		"render_backend": _render_backend_label(),
+		"display_size": "%dx%d" % [display_size.x, display_size.y],
+		"analysis_size": "%dx%d" % [analysis_size.x, analysis_size.y],
+		"pipeline_display_size": "%dx%d" % [gpu_frame_pipeline.get_display_size().x, gpu_frame_pipeline.get_display_size().y] if gpu_frame_pipeline != null else "",
+		"pipeline_analysis_size": "%dx%d" % [gpu_frame_pipeline.get_analysis_size().x, gpu_frame_pipeline.get_analysis_size().y] if gpu_frame_pipeline != null else "",
 		"raw_risk": float(_last_runtime_metrics.get("raw_risk", 0.0)),
-		"after_risk": float(_last_runtime_metrics.get("output_risk", _last_runtime_metrics.get("solver_after_risk", 0.0))),
+		"after_risk": float(_last_after_metrics.get("raw_risk", _last_runtime_metrics.get("solver_after_risk", 0.0))),
 		"solver_correction_scale": float(_last_runtime_metrics.get("solver_correction_scale", 0.0)),
 		"solver_identity_after_risk": float(_last_runtime_metrics.get("solver_identity_after_risk", 0.0)),
 		"solver_after_risk": float(_last_runtime_metrics.get("solver_after_risk", 0.0)),
+		"shader_strength": float(_last_shader_parameters.get("mitigation_strength", 0.0)),
 		"correction_mix_alpha": float(_last_shader_parameters.get("correction_mix_alpha", 0.0)),
+		"emergency_hold": float(_last_shader_parameters.get("emergency_hold", 0.0)),
+		"mitigation_enabled_signal": float(_last_shader_parameters.get("mitigation_enabled_signal", 0.0)),
 		"frame": _process_frame_count,
 		"raw_samples": _raw_sample_count,
 		"after_samples": _after_sample_count,
@@ -425,12 +550,29 @@ func _act_k64_set_local_correction(args: Dictionary) -> Dictionary:
 		gpu_frame_pipeline.reset_output_history()
 	return _provide_k64_status()
 
+func _act_k64_set_hue_preserve(args: Dictionary) -> Dictionary:
+	preserve_source_hue = bool(args.get("enabled", args.get("value", preserve_source_hue)))
+	if hue_preserve_toggle != null:
+		hue_preserve_toggle.set_pressed_no_signal(preserve_source_hue)
+	_sync_analyzer_settings()
+	if gpu_frame_pipeline != null:
+		gpu_frame_pipeline.reset_output_history()
+	return _provide_k64_status()
+
 func _act_k64_set_current_frame_solver(args: Dictionary) -> Dictionary:
 	current_frame_solver_enabled = bool(args.get("enabled", args.get("value", current_frame_solver_enabled)))
 	if current_frame_solver_toggle != null:
 		current_frame_solver_toggle.set_pressed_no_signal(current_frame_solver_enabled)
 	_sync_analyzer_settings()
 	_reset_analysis_state()
+	return _provide_k64_status()
+
+func _act_k64_restart_video(_args: Dictionary) -> Dictionary:
+	_on_restart_video_pressed()
+	return _provide_k64_status()
+
+func _act_k64_clear_history(_args: Dictionary) -> Dictionary:
+	_on_clear_history_pressed()
 	return _provide_k64_status()
 
 func _act_k64_set_spatial_sensitivity(args: Dictionary) -> Dictionary:
@@ -465,25 +607,25 @@ func _select_option_by_item_id(option: OptionButton, item_id: int) -> void:
 func _process(delta: float) -> void:
 	if not _core_available:
 		return
+	var profile_total_start := Time.get_ticks_usec()
 	_process_frame_count += 1
-	if _process_frame_count == 130 and OS.get_environment("QUELL_SHOT") != "":
-		var shot_img := get_viewport().get_texture().get_image()
-		if shot_img != null:
-			shot_img.save_png(OS.get_environment("QUELL_SHOT"))
-		get_tree().quit()
-		return
 	elapsed_seconds += delta
+	var setup_start := Time.get_ticks_usec()
 	var source: Dictionary = _current_source_config()
 	var envelope: float = _demo_risk_envelope(float(source.get("risk_cycle_hz", 0.10)))
-	if content_material != null:
-		content_material.set_shader_parameter("time_seconds", elapsed_seconds)
-		content_material.set_shader_parameter("risk_envelope", envelope)
+	if content_material != null and not _is_frame_sequence_source(source):
+		_set_content_shader_parameter("time_seconds", elapsed_seconds)
+		_set_content_shader_parameter("risk_envelope", envelope)
+	_profile_add("setup_us", Time.get_ticks_usec() - setup_start)
 
 	var metrics: Dictionary
 	var shader_parameters: Dictionary
+	var ready_start := Time.get_ticks_usec()
+	var has_gpu_frame_pipeline := _has_gpu_frame_pipeline()
+	_profile_add("ready_us", Time.get_ticks_usec() - ready_start)
 	if DisplayServer.get_name() == "headless":
 		if _is_frame_sequence_source(source):
-			var headless_sequence_image = _load_frame_sequence_image(source, elapsed_seconds)
+			var headless_sequence_image = _load_frame_sequence_image_for_demo(source, delta)
 			if headless_sequence_image != null:
 				metrics = analyzer.update_from_image(headless_sequence_image, delta, elapsed_seconds)
 				metrics["metric_backend"] = "image-sequence"
@@ -495,28 +637,57 @@ func _process(delta: float) -> void:
 			metrics["metric_backend"] = "generated"
 		shader_parameters = analyzer.shader_parameters(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
-		_last_shader_parameters = shader_parameters.duplicate(false)
-		_last_runtime_metrics = metrics.duplicate(false)
-	elif _has_gpu_frame_pipeline():
-		_ensure_gpu_frame_pipeline_size()
+	elif has_gpu_frame_pipeline:
+		var ensure_start := Time.get_ticks_usec()
+		_ensure_gpu_frame_pipeline_size(source)
+		_profile_add("ensure_us", Time.get_ticks_usec() - ensure_start)
 		var uploaded_sequence_frame := false
+		var analysis_delta := delta
+		var after_analysis_delta := delta
 		var gpu_sequence_image = null
 		if _is_frame_sequence_source(source):
-			gpu_sequence_image = _load_frame_sequence_image(source, elapsed_seconds)
+			_frame_sequence_pending_analysis_delta += max(delta, 0.0)
+			var load_start := Time.get_ticks_usec()
+			gpu_sequence_image = _load_frame_sequence_image_for_demo(source, delta)
+			_profile_add("load_us", Time.get_ticks_usec() - load_start)
+			if not _frame_sequence_frame_changed and not _last_frame_sequence_metrics.is_empty():
+				var cache_start := Time.get_ticks_usec()
+				metrics = _last_frame_sequence_metrics.duplicate(false)
+				metrics["metric_backend"] = "gpu-frame-seq-cached"
+				_profile_add("cache_us", Time.get_ticks_usec() - cache_start)
+				if mitigation_enabled and gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null:
+					_after_sample_count += 1
+					var held_after_start := Time.get_ticks_usec()
+					var held_after_metrics: Dictionary = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+					_profile_add("analyze_us", Time.get_ticks_usec() - held_after_start)
+					var held_feedback_start := Time.get_ticks_usec()
+					_apply_measured_after_metrics(metrics, held_after_metrics, after_analysis_delta)
+					_last_after_metrics = held_after_metrics.duplicate(false)
+					_last_runtime_metrics = metrics.duplicate(false)
+					_last_frame_sequence_metrics = metrics.duplicate(false)
+					_profile_add("feedback_us", Time.get_ticks_usec() - held_feedback_start)
+				var cached_hud_start := Time.get_ticks_usec()
+				_update_hud(metrics)
+				_profile_add("hud_us", Time.get_ticks_usec() - cached_hud_start)
+				_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+				_profile_sample()
+				return
+			analysis_delta = max(_frame_sequence_pending_analysis_delta, delta)
+			_frame_sequence_pending_analysis_delta = 0.0
 			if gpu_sequence_image != null:
-				_source_aspect = float(gpu_sequence_image.get_width()) / float(max(1, gpu_sequence_image.get_height()))
+				var upload_start := Time.get_ticks_usec()
 				uploaded_sequence_frame = gpu_frame_pipeline.upload_source_image(gpu_sequence_image, true)
+				_profile_add("texture_us", Time.get_ticks_usec() - upload_start)
 		if not uploaded_sequence_frame:
-			_source_aspect = 0.0
 			var source_config := source.duplicate(true)
 			source_config["index"] = current_mode
+			var generate_start := Time.get_ticks_usec()
 			gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
-		# Keep the analysis texture at the same aspect as the display buffer so the
-		# hazard map's UVs align with the displayed video (otherwise the correction
-		# mask is applied at a different aspect than the source and misses the flash).
-		_analysis_size = _compute_analysis_size(_current_aspect())
+			_profile_add("texture_us", Time.get_ticks_usec() - generate_start)
 		_raw_sample_count += 1
+		var analyze_start := Time.get_ticks_usec()
 		var raw_gpu_metrics: Dictionary = gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, elapsed_seconds)
+		_profile_add("analyze_us", Time.get_ticks_usec() - analyze_start)
 		if not uploaded_sequence_frame:
 			raw_gpu_metrics["source_kind"] = "generated"
 			var estimated_temporal_contrast := _estimate_mode_temporal_contrast(source)
@@ -525,62 +696,84 @@ func _process(delta: float) -> void:
 				raw_gpu_metrics["general_flash_area"] = max(float(raw_gpu_metrics.get("general_flash_area", 0.0)), float(source.get("unsafe_area", 1.0)))
 		else:
 			raw_gpu_metrics["source_kind"] = "frame_sequence"
-		metrics = analyzer.update_from_metrics(raw_gpu_metrics, delta, elapsed_seconds)
+			if ENABLE_FRAME_SEQUENCE_RAW_SPATIAL_CPU_OVERRIDE:
+				var spatial_cpu_start := Time.get_ticks_usec()
+				_apply_cpu_spatial_override(raw_gpu_metrics, gpu_sequence_image, analyzer)
+				_profile_add("spatial_cpu_us", Time.get_ticks_usec() - spatial_cpu_start)
+		var controller_start := Time.get_ticks_usec()
+		metrics = analyzer.update_from_metrics(raw_gpu_metrics, analysis_delta, elapsed_seconds)
+		_profile_add("controller_us", Time.get_ticks_usec() - controller_start)
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
+		var shader_start := Time.get_ticks_usec()
 		shader_parameters = analyzer.shader_parameters(metrics)
-		var hazard_map_rid: RID = gpu_analyzer.hazard_map_texture.texture_rd_rid if gpu_analyzer.hazard_map_texture != null else RID()
-		if current_frame_solver != null and current_frame_solver_enabled:
-			var solver_result: Dictionary = current_frame_solver.solve(
-				gpu_frame_pipeline,
-				gpu_after_analyzer,
-				after_analyzer,
-				shader_parameters,
-				headroom_margin,
-				delta,
-				elapsed_seconds,
-				"frame_sequence" if uploaded_sequence_frame else "generated",
-				null,
-				false,
-				metrics,
-				hazard_map_rid
-			)
-			shader_parameters = solver_result.get("parameters", shader_parameters)
-			_apply_current_frame_solver_metrics(metrics, solver_result)
-			analyzer.apply_current_frame_shader_solution(shader_parameters, metrics)
+		var solver_result: Dictionary = current_frame_solver.solve(
+			gpu_frame_pipeline,
+			gpu_after_analyzer,
+			after_analyzer,
+			shader_parameters,
+			headroom_margin,
+			after_analysis_delta,
+			elapsed_seconds,
+			"frame_sequence" if uploaded_sequence_frame else "generated",
+			null,
+			false,
+			metrics
+		)
+		shader_parameters = solver_result.get("parameters", shader_parameters)
+		_apply_current_frame_solver_metrics(metrics, solver_result)
+		analyzer.apply_current_frame_shader_solution(shader_parameters, metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
 		_last_shader_parameters = shader_parameters.duplicate(false)
-		gpu_frame_pipeline.apply_mitigation(shader_parameters, hazard_map_rid)
-		source_display.texture = gpu_frame_pipeline.after_texture
+		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
+		var mitigate_start := Time.get_ticks_usec()
+		gpu_frame_pipeline.apply_mitigation(shader_parameters)
+		_profile_add("texture_us", Time.get_ticks_usec() - mitigate_start)
 		_after_sample_count += 1
-		var after_metrics: Dictionary = metrics.duplicate(true) if not mitigation_enabled else _measure_after_for_source(source, elapsed_seconds, delta)
-		_apply_measured_after_metrics(metrics, after_metrics, delta)
+		var after_analyze_start := Time.get_ticks_usec()
+		var after_metrics: Dictionary = metrics.duplicate(true) if not mitigation_enabled else _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+		_profile_add("analyze_us", Time.get_ticks_usec() - after_analyze_start)
+		var feedback_start := Time.get_ticks_usec()
+		_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
+		_last_after_metrics = after_metrics.duplicate(false)
 		_last_runtime_metrics = metrics.duplicate(false)
+		_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
+		if uploaded_sequence_frame:
+			var store_start := Time.get_ticks_usec()
+			_last_frame_sequence_metrics = metrics.duplicate(false)
+			_profile_add("store_us", Time.get_ticks_usec() - store_start)
 	else:
 		metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
 		metrics["metric_backend"] = "generated"
 		shader_parameters = analyzer.shader_parameters(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
-		_last_shader_parameters = shader_parameters.duplicate(false)
-		_last_runtime_metrics = metrics.duplicate(false)
-	_apply_shader_parameters(shader_parameters)
+	var hud_start := Time.get_ticks_usec()
 	_update_hud(metrics)
+	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
+	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+	_profile_sample()
+	if _process_frame_count == 130 and OS.get_environment("QUELL_SHOT") != "":
+		var shot_img := get_viewport().get_texture().get_image()
+		if shot_img != null:
+			shot_img.save_png(OS.get_environment("QUELL_SHOT"))
+		get_tree().quit()
 
 func _build_visual_layers() -> void:
-	if gpu_frame_pipeline != null and gpu_analyzer.is_ready() and gpu_after_analyzer.is_ready() and gpu_frame_pipeline.configure(_display_size(), _analysis_size):
+	var source := _current_source_config()
+	var display_size := _pipeline_display_size_for_source(source)
+	var analysis_size := _pipeline_analysis_size_for_source(source, display_size)
+	if gpu_frame_pipeline != null and gpu_analyzer.is_ready() and gpu_after_analyzer.is_ready() and gpu_frame_pipeline.configure(display_size, analysis_size):
 		source_display = TextureRect.new()
 		source_display.name = "GpuAfterDisplayFullRes"
 		source_display.set_anchors_preset(Control.PRESET_FULL_RECT)
 		source_display.texture = gpu_frame_pipeline.after_texture
-		# Keep the source aspect (letterbox) so resizing never distorts.
-		source_display.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		source_display.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+		source_display.stretch_mode = TextureRect.STRETCH_SCALE
 		source_display.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		add_child(source_display)
 		return
 
 	source_viewport = SubViewport.new()
 	source_viewport.name = "AnalysisSourceViewport"
-	source_viewport.size = _analysis_size
+	source_viewport.size = analysis_size
 	source_viewport.disable_3d = true
 	source_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	add_child(source_viewport)
@@ -608,24 +801,8 @@ func _build_visual_layers() -> void:
 	source_display.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(source_display)
 
-	var post_layer := CanvasLayer.new()
-	post_layer.name = "QuellPostProcess"
-	post_layer.layer = 10
-	add_child(post_layer)
-
-	var post_rect := ColorRect.new()
-	post_rect.name = "Mitigator"
-	post_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
-	post_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	post_layer.add_child(post_rect)
-
-	# quell_mitigator.gdshader is proprietary mitigation policy (kept out of the
-	# public repo via .gitignore). Degrade to unmitigated Raw display if absent.
-	var mitigator_path := "res://shaders/quell_mitigator.gdshader"
-	if ResourceLoader.exists(mitigator_path):
-		post_material = ShaderMaterial.new()
-		post_material.shader = load(mitigator_path)
-		post_rect.material = post_material
+	if gpu_frame_pipeline != null and gpu_analyzer.is_ready():
+		gpu_frame_pipeline.configure(_display_size(), analysis_size)
 
 func _build_hud() -> void:
 	var hud_layer := CanvasLayer.new()
@@ -636,6 +813,7 @@ func _build_hud() -> void:
 	var panel := PanelContainer.new()
 	panel.position = Vector2(16.0, 16.0)
 	panel.custom_minimum_size = Vector2(430.0, 0.0)
+	debug_panel = panel
 	hud_layer.add_child(panel)
 
 	var panel_style := StyleBoxFlat.new()
@@ -702,10 +880,16 @@ func _build_hud() -> void:
 	stack.add_child(_with_caption("Spatial", spatial_sensitivity_select))
 
 	local_correction_toggle = CheckButton.new()
-	local_correction_toggle.text = "Local current"
+	local_correction_toggle.text = "Local correction"
 	local_correction_toggle.button_pressed = local_correction_enabled
 	local_correction_toggle.toggled.connect(_on_local_correction_toggled)
 	stack.add_child(local_correction_toggle)
+
+	hue_preserve_toggle = CheckButton.new()
+	hue_preserve_toggle.text = "Raw hue"
+	hue_preserve_toggle.button_pressed = preserve_source_hue
+	hue_preserve_toggle.toggled.connect(_on_hue_preserve_toggled)
+	stack.add_child(hue_preserve_toggle)
 
 	current_frame_solver_toggle = CheckButton.new()
 	current_frame_solver_toggle.text = "CurrentFrame solver"
@@ -713,6 +897,7 @@ func _build_hud() -> void:
 	current_frame_solver_toggle.toggled.connect(_on_current_frame_solver_toggled)
 	stack.add_child(current_frame_solver_toggle)
 
+	stack.add_child(_reset_controls())
 	stack.add_child(_contribution_controls())
 
 	var distance_slider := HSlider.new()
@@ -788,14 +973,22 @@ func _build_hud() -> void:
 	_add_metric_row(stack, "local_correction", "Local")
 	_add_metric_row(stack, "mitigation", "Mitigation")
 
-	risk_graph = RiskGraphClass.new()
-	risk_graph.headroom_margin = headroom_margin
-	stack.add_child(risk_graph)
-
 	status_label = Label.new()
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status_label.add_theme_color_override("font_color", Color(0.70, 0.78, 0.82))
 	stack.add_child(status_label)
+
+	risk_graph = RiskGraphClass.new()
+	risk_graph.headroom_margin = headroom_margin
+	risk_graph.anchor_left = 1.0
+	risk_graph.anchor_top = 1.0
+	risk_graph.anchor_right = 1.0
+	risk_graph.anchor_bottom = 1.0
+	risk_graph.offset_left = -456.0
+	risk_graph.offset_top = -224.0
+	risk_graph.offset_right = -16.0
+	risk_graph.offset_bottom = -16.0
+	hud_layer.add_child(risk_graph)
 
 	_refresh_static_labels()
 
@@ -829,6 +1022,26 @@ func _slider_row(caption: String, slider: HSlider, value_label: Label) -> Contro
 	wrapper.add_child(header)
 	wrapper.add_child(slider)
 	return wrapper
+
+func _reset_controls() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+
+	var restart_video := Button.new()
+	restart_video.text = "Restart video"
+	restart_video.tooltip_text = "Restart the current frame sequence and clear analyzer history."
+	restart_video.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	restart_video.pressed.connect(_on_restart_video_pressed)
+	row.add_child(restart_video)
+
+	var clear_history := Button.new()
+	clear_history.text = "Clear history"
+	clear_history.tooltip_text = "Clear analyzer feedback and the risk graph without changing the current video frame."
+	clear_history.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	clear_history.pressed.connect(_on_clear_history_pressed)
+	row.add_child(clear_history)
+
+	return row
 
 func _add_metric_row(parent: VBoxContainer, key: String, caption: String) -> void:
 	var row := HBoxContainer.new()
@@ -887,12 +1100,6 @@ func _contribution_controls() -> Control:
 	wrapper.add_child(row)
 	return wrapper
 
-func _apply_shader_parameters(parameters: Dictionary) -> void:
-	if post_material == null:
-		return
-	for key in parameters.keys():
-		post_material.set_shader_parameter(StringName(key), parameters[key])
-
 func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary) -> void:
 	metrics["controller_mitigation"] = float(metrics.get("mitigation", 0.0))
 	metrics["mitigation"] = float(parameters.get("mitigation_strength", metrics.get("mitigation", 0.0)))
@@ -901,19 +1108,6 @@ func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary
 	metrics["contrast_control"] = 1.0 - float(parameters.get("contrast_scale_limit", 1.0))
 	metrics["feedback_control"] = 1.0 - float(parameters.get("temporal_blend_alpha", 1.0))
 	metrics["local_correction"] = float(parameters.get("local_correction_strength", 0.0))
-
-func _apply_current_frame_solver_metrics(metrics: Dictionary, solver_result: Dictionary) -> void:
-	var solver_info = solver_result.get("solver", {})
-	if not (solver_info is Dictionary) or not bool(solver_info.get("active", false)):
-		return
-	metrics["solver_correction_scale"] = float(solver_info.get("correction_scale", 1.0))
-	metrics["solver_identity_after_risk"] = float(solver_info.get("identity_after_risk", 0.0))
-	metrics["solver_after_risk"] = float(solver_info.get("after_risk", solver_info.get("upper_after_risk", 0.0)))
-	metrics["solver_identity"] = bool(solver_info.get("identity", false))
-	metrics["solver_upper_bound_exceeded"] = bool(solver_info.get("upper_bound_exceeded", false))
-	metrics["solver_upper_candidate"] = String(solver_info.get("upper_candidate", ""))
-	metrics["solver_upper_after_risk"] = float(solver_info.get("upper_after_risk", 0.0))
-	metrics["solver_luminance_delta_limit"] = float(solver_info.get("luminance_delta_limit", -1.0))
 
 func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics["raw_risk"])
@@ -931,6 +1125,9 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 	metrics["after_red_flash_area"] = after_metrics.get("red_flash_area", 0.0)
 
 func _update_hud(metrics: Dictionary) -> void:
+	if elapsed_seconds + 0.0001 < _next_hud_update_time:
+		return
+	_next_hud_update_time = elapsed_seconds + (1.0 / HUD_UPDATE_HZ)
 	risk_graph.add_sample(elapsed_seconds, metrics)
 
 	for key in metric_bars.keys():
@@ -942,8 +1139,16 @@ func _update_hud(metrics: Dictionary) -> void:
 
 	var state := "off" if not mitigation_enabled else ("active" if float(metrics["mitigation"]) > 0.01 else "idle")
 	var drop_percent := roundi(float(metrics["reduction_ratio"]) * 100.0)
-	status_label.text = "%s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
+	var display_size := _display_size()
+	var analysis_size := _analysis_size_for_display(display_size)
+	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
 		state,
+		_render_backend_label(),
+		"%dx%d" % [display_size.x, display_size.y],
+		"%dx%d" % [analysis_size.x, analysis_size.y],
+		"on" if local_correction_enabled else "off",
+		"raw" if preserve_source_hue else "off",
+		"on" if current_frame_solver_enabled else "off",
 		_mitigation_mode_label(),
 		_spatial_sensitivity_label(),
 		String(metrics.get("metric_backend", "generated")),
@@ -958,14 +1163,6 @@ func _update_hud(metrics: Dictionary) -> void:
 		_contribution_status(),
 		_comparator_status_for_mode(),
 	]
-	# Debug: output (display buffer) vs mask (analysis) resolution + aspect, so a
-	# mask/source aspect mismatch is visible at a glance (the two ARs must match).
-	var out_size: Vector2i = gpu_frame_pipeline.get_display_size() if gpu_frame_pipeline != null else _display_size()
-	var mask_size: Vector2i = gpu_frame_pipeline.get_analysis_size() if gpu_frame_pipeline != null else _analysis_size
-	status_label.text += " / out %dx%d(%.2f) mask %dx%d(%.2f)" % [
-		out_size.x, out_size.y, float(out_size.x) / float(max(1, out_size.y)),
-		mask_size.x, mask_size.y, float(mask_size.x) / float(max(1, mask_size.y)),
-	]
 
 func _apply_mode(index: int) -> void:
 	current_mode = clampi(index, 0, _mode_configs.size() - 1)
@@ -974,11 +1171,11 @@ func _apply_mode(index: int) -> void:
 	if mode_select != null and mode_select.selected != current_mode:
 		mode_select.select(current_mode)
 	if content_material != null and not _is_frame_sequence_source(config):
-		content_material.set_shader_parameter("mode", current_mode)
-		content_material.set_shader_parameter("flash_hz", float(config["flash_hz"]))
-		content_material.set_shader_parameter("red_hz", float(config["red_hz"]))
-		content_material.set_shader_parameter("stripe_cycles", float(config["stripe_cycles"]))
-		content_material.set_shader_parameter("unsafe_area", float(config["unsafe_area"]))
+		_set_content_shader_parameter("mode", current_mode)
+		_set_content_shader_parameter("flash_hz", float(config["flash_hz"]))
+		_set_content_shader_parameter("red_hz", float(config["red_hz"]))
+		_set_content_shader_parameter("stripe_cycles", float(config["stripe_cycles"]))
+		_set_content_shader_parameter("unsafe_area", float(config["unsafe_area"]))
 	_reset_analysis_state()
 
 func _demo_risk_envelope(cycle_hz: float) -> float:
@@ -995,6 +1192,7 @@ func _sync_analyzer_settings() -> void:
 	analyzer.max_brightness_reduction = max_brightness_reduction
 	analyzer.max_feedback_amount = max_feedback_amount
 	analyzer.local_correction_enabled = local_correction_enabled
+	analyzer.preserve_source_hue = preserve_source_hue
 	analyzer.spatial_sensitivity = spatial_sensitivity
 	_apply_contribution_settings(analyzer)
 	after_analyzer.viewing_distance_m = viewing_distance_m
@@ -1006,12 +1204,12 @@ func _sync_analyzer_settings() -> void:
 	after_analyzer.max_brightness_reduction = max_brightness_reduction
 	after_analyzer.max_feedback_amount = max_feedback_amount
 	after_analyzer.local_correction_enabled = local_correction_enabled
+	after_analyzer.preserve_source_hue = preserve_source_hue
 	after_analyzer.spatial_sensitivity = spatial_sensitivity
 	_apply_contribution_settings(after_analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
-	if current_frame_solver != null:
-		current_frame_solver.enabled = current_frame_solver_enabled
+	current_frame_solver.enabled = current_frame_solver_enabled
 
 func _default_contribution_enabled() -> Dictionary:
 	return {
@@ -1026,6 +1224,10 @@ func _apply_contribution_settings(target_analyzer) -> void:
 		target_analyzer.set_contribution_enabled(String(key), bool(contribution_enabled[key]))
 
 func _reset_analysis_state(reset_graph: bool = true) -> void:
+	_reset_history_state(reset_graph)
+	_reset_frame_sequence_playback()
+
+func _reset_history_state(reset_graph: bool = true) -> void:
 	analyzer.reset()
 	after_analyzer.reset()
 	gpu_analyzer.reset()
@@ -1033,9 +1235,15 @@ func _reset_analysis_state(reset_graph: bool = true) -> void:
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.reset_output_history()
 	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(_current_source_config()))
+	_reset_frame_sequence_playback()
 	_process_frame_count = 0
 	_raw_sample_count = 0
 	_after_sample_count = 0
+	_next_hud_update_time = 0.0
+	_last_frame_sequence_metrics.clear()
+	_last_runtime_metrics.clear()
+	_last_after_metrics.clear()
+	_last_shader_parameters.clear()
 	if reset_graph and risk_graph != null:
 		risk_graph.reset()
 
@@ -1081,14 +1289,42 @@ func _current_source_config() -> Dictionary:
 func _is_frame_sequence_source(config: Dictionary) -> bool:
 	return String(config.get("source_type", "generated")) == "frame_sequence"
 
-func _load_frame_sequence_image(config: Dictionary, time_seconds: float):
+func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
+	_frame_sequence_frame_changed = false
 	var source_id := String(config.get("id", ""))
 	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
 	if frame_paths.is_empty():
 		return null
 	var fps: float = max(1.0, float(config.get("fps", 24.0)))
+	if _frame_sequence_active_id != source_id:
+		_frame_sequence_active_id = source_id
+		_frame_sequence_index = 0
+		_frame_sequence_accumulator = 0.0
+		_frame_sequence_frame_changed = true
+	else:
+		_frame_sequence_accumulator += max(delta, 0.0)
+		var frame_duration := 1.0 / fps
+		if _frame_sequence_accumulator >= frame_duration:
+			var advance_count := int(floor(_frame_sequence_accumulator / frame_duration))
+			_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
+			_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
+			_frame_sequence_frame_changed = advance_count > 0
+	var frame_path := String(frame_paths[_frame_sequence_index])
+	return _load_frame_sequence_path(frame_path)
+
+func _load_frame_sequence_image(config: Dictionary, time_seconds: float, fps_limit: float = -1.0):
+	var source_id := String(config.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	if frame_paths.is_empty():
+		return null
+	var fps: float = max(1.0, float(config.get("fps", 24.0)))
+	if fps_limit > 0.0:
+		fps = min(fps, fps_limit)
 	var frame_index: int = int(floor(time_seconds * fps)) % frame_paths.size()
 	var frame_path := String(frame_paths[frame_index])
+	return _load_frame_sequence_path(frame_path)
+
+func _load_frame_sequence_path(frame_path: String):
 	if _frame_cache.has(frame_path):
 		return _frame_cache[frame_path]
 
@@ -1105,14 +1341,43 @@ func _load_frame_sequence_image(config: Dictionary, time_seconds: float):
 		_frame_cache.erase(evicted_path)
 	return image
 
-# Realtime demo uses the GPU spatial metric for all sources. The per-frame CPU
-# spatial override (get_image() readback + full-image analyze_spatial_image) was
-# an offline-validation accuracy aid and is too heavy for live frame sequences;
-# that fidelity path lives in the monorepo validation harness, not here.
-func _measure_after_for_source(_source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
-	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, time_seconds)
+func _reset_frame_sequence_playback() -> void:
+	_frame_sequence_active_id = ""
+	_frame_sequence_index = 0
+	_frame_sequence_accumulator = 0.0
+	_frame_sequence_frame_changed = false
+	_frame_sequence_pending_analysis_delta = 0.0
+	_last_frame_sequence_metrics.clear()
+
+func _measure_after_for_source(source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
+	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after"
+	if _is_frame_sequence_source(source):
+		after_gpu_metrics["source_kind"] = "frame_sequence"
+	if ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK and _is_frame_sequence_source(source) and gpu_frame_pipeline.after_texture != null:
+		var after_image: Image = gpu_frame_pipeline.after_texture.get_image()
+		_apply_cpu_spatial_override(after_gpu_metrics, after_image, after_analyzer)
 	return after_analyzer.update_from_metrics(after_gpu_metrics, delta, time_seconds)
+
+func _apply_current_frame_solver_metrics(metrics: Dictionary, solver_result: Dictionary) -> void:
+	var solver_info = solver_result.get("solver", {})
+	if not (solver_info is Dictionary) or not bool(solver_info.get("active", false)):
+		return
+	metrics["solver_correction_scale"] = float(solver_info.get("correction_scale", 1.0))
+	metrics["solver_identity_after_risk"] = float(solver_info.get("identity_after_risk", 0.0))
+	metrics["solver_after_risk"] = float(solver_info.get("after_risk", solver_info.get("upper_after_risk", 0.0)))
+	metrics["solver_identity"] = bool(solver_info.get("identity", false))
+	metrics["solver_upper_bound_exceeded"] = bool(solver_info.get("upper_bound_exceeded", false))
+	metrics["solver_upper_candidate"] = String(solver_info.get("upper_candidate", ""))
+	metrics["solver_upper_after_risk"] = float(solver_info.get("upper_after_risk", 0.0))
+	metrics["solver_emergency_after_risk"] = float(solver_info.get("emergency_after_risk", -1.0))
+	metrics["solver_emergency_hold_after_risk"] = float(solver_info.get("emergency_hold_after_risk", -1.0))
+	metrics["solver_emergency_hold_mix"] = float(solver_info.get("emergency_hold_mix", 0.0))
+
+func _apply_cpu_spatial_override(metrics: Dictionary, image: Image, spatial_analyzer) -> void:
+	if spatial_analyzer == null:
+		return
+	spatial_analyzer.apply_spatial_image_override(metrics, image)
 
 func _load_comparator_baselines() -> void:
 	var text: String = FileAccess.get_file_as_string("res://tests/detection_corpus.json")
@@ -1178,6 +1443,8 @@ func _comparator_label(value, metric: String) -> String:
 	return "data"
 
 func _prewarm_mitigation_for_mode(config: Dictionary) -> float:
+	if _is_frame_sequence_source(config):
+		return 0.0
 	return analyzer.required_mitigation_for_risk(_estimate_mode_risk(config))
 
 func _estimate_mode_risk(config: Dictionary) -> float:
@@ -1206,50 +1473,68 @@ func _has_gpu_frame_pipeline() -> bool:
 		and gpu_frame_pipeline.source_texture != null
 		and gpu_frame_pipeline.after_texture != null
 		and gpu_frame_pipeline.analysis_source_texture != null
-		and gpu_frame_pipeline.analysis_after_texture != null
 		and gpu_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_source_texture)
-		and gpu_after_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_after_texture)
+		and gpu_after_analyzer.can_analyze_texture(gpu_frame_pipeline.after_texture)
 	)
 
-func _ensure_gpu_frame_pipeline_size() -> void:
+func _render_backend_label() -> String:
+	if _has_gpu_frame_pipeline():
+		return "rd-texture"
+	return "generated"
+
+func _analysis_viewport_image() -> Image:
+	if source_viewport == null:
+		return null
+	var source_texture := source_viewport.get_texture()
+	if source_texture == null:
+		return null
+	var image := source_texture.get_image()
+	if image == null or image.is_empty() or image.get_width() <= 0 or image.get_height() <= 0:
+		return null
+	return image
+
+func _ensure_gpu_frame_pipeline_size(source: Dictionary) -> void:
 	if gpu_frame_pipeline == null:
 		return
-	var display_size := _display_size()
-	if gpu_frame_pipeline.get_display_size() == display_size and gpu_frame_pipeline.get_analysis_size() == _analysis_size:
+	var display_size := _pipeline_display_size_for_source(source)
+	var analysis_size := _pipeline_analysis_size_for_source(source, display_size)
+	if gpu_frame_pipeline.get_display_size() == display_size and gpu_frame_pipeline.get_analysis_size() == analysis_size:
 		return
-	if gpu_frame_pipeline.configure(display_size, _analysis_size):
+	if gpu_frame_pipeline.configure(display_size, analysis_size):
 		source_display.texture = gpu_frame_pipeline.after_texture
 		_reset_analysis_state(false)
 
-func _current_aspect() -> float:
-	if _source_aspect > 0.0:
-		return _source_aspect
-	var win: Vector2i = DisplayServer.window_get_size()
-	return float(max(1, win.x)) / float(max(1, win.y))
+func _pipeline_display_size_for_source(source: Dictionary) -> Vector2i:
+	if _is_frame_sequence_source(source):
+		var source_id := String(source.get("id", ""))
+		var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+		if not frame_paths.is_empty():
+			var image: Image = _load_frame_sequence_path(String(frame_paths[0]))
+			if image != null and not image.is_empty():
+				return Vector2i(maxi(1, image.get_width()), maxi(1, image.get_height()))
+	return _display_size()
 
-func _compute_analysis_size(aspect: float) -> Vector2i:
-	# Small detection texture at the source aspect (height fixed, width tracks
-	# aspect) so the hazard mask aligns with the displayed video.
-	var height: int = 144
-	var width: int = maxi(16, roundi(float(height) * aspect))
-	return Vector2i(width, height)
+func _pipeline_analysis_size_for_source(source: Dictionary, display_size: Vector2i) -> Vector2i:
+	if _is_frame_sequence_source(source):
+		return display_size
+	return _analysis_size_for_display(display_size)
+
+func _set_content_shader_parameter(parameter: StringName, value: Variant) -> void:
+	if content_material != null:
+		content_material.set_shader_parameter(parameter, value)
 
 func _display_size() -> Vector2i:
-	# Reduced mitigation buffer: 1/4 of the native window height, at the source
-	# aspect ratio. The bicubic display shader upscales it back to native and
-	# STRETCH_KEEP_ASPECT_CENTERED letterboxes it, so the output is sharp-enough,
-	# cheap, and never distorts on resize. Following the window size keeps the
-	# buffer matched to the display (the per-frame reconfigure picks up resizes).
-	var window_size: Vector2i = DisplayServer.window_get_size()
+	var window_size: Vector2i = get_window().size
 	if window_size.x <= 0 or window_size.y <= 0:
 		var viewport_size: Vector2 = get_viewport_rect().size
-		window_size = Vector2i(roundi(viewport_size.x), roundi(viewport_size.y))
-	var aspect: float = _source_aspect
-	if aspect <= 0.0:
-		aspect = float(max(1, window_size.x)) / float(max(1, window_size.y))
-	var height: int = max(1, window_size.y / DISPLAY_BUFFER_DIVISOR)
-	var width: int = max(1, roundi(float(height) * aspect))
-	return Vector2i(width, height)
+		return Vector2i(max(1, roundi(viewport_size.x)), max(1, roundi(viewport_size.y)))
+	return Vector2i(max(1, window_size.x), max(1, window_size.y))
+
+func _analysis_size_for_display(display_size: Vector2i) -> Vector2i:
+	return Vector2i(
+		max(1, int(ceil(float(display_size.x) / float(ANALYSIS_SCALE_DIVISOR)))),
+		max(1, int(ceil(float(display_size.y) / float(ANALYSIS_SCALE_DIVISOR))))
+	)
 
 func _refresh_static_labels() -> void:
 	distance_value_label.text = "%.2f m" % viewing_distance_m
@@ -1286,10 +1571,24 @@ func _on_local_correction_toggled(enabled: bool) -> void:
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.reset_output_history()
 
+func _on_hue_preserve_toggled(enabled: bool) -> void:
+	preserve_source_hue = enabled
+	_sync_analyzer_settings()
+	if gpu_frame_pipeline != null:
+		gpu_frame_pipeline.reset_output_history()
+
 func _on_current_frame_solver_toggled(enabled: bool) -> void:
 	current_frame_solver_enabled = enabled
 	_sync_analyzer_settings()
 	_reset_analysis_state()
+
+func _on_restart_video_pressed() -> void:
+	elapsed_seconds = 0.0
+	_reset_frame_sequence_playback()
+	_reset_history_state()
+
+func _on_clear_history_pressed() -> void:
+	_reset_history_state()
 
 func _on_contribution_toggled(enabled: bool, component: String) -> void:
 	contribution_enabled[component] = enabled
