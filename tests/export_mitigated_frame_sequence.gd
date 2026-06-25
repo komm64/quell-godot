@@ -26,6 +26,7 @@ var _analysis_size := DEFAULT_ANALYSIS_SIZE
 var _mitigation_mode: int = RuntimeAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY
 var _temporal_blend_alpha: float = 0.50
 var _current_frame_solver_enabled := false
+var _analytic_solver_enabled := false
 var _live_cadence := false
 var _max_seconds := 0.0
 var _max_frames := 0
@@ -85,6 +86,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	var solver_after_analyzer = RuntimeAnalyzerClass.new()
 	var current_frame_solver = CurrentFrameSolverClass.new()
 	current_frame_solver.enabled = _current_frame_solver_enabled
+	current_frame_solver.analytic_enabled = _analytic_solver_enabled
 	analyzer.headroom_margin = DEFAULT_TARGET_RISK
 	analyzer.local_correction_enabled = true
 	analyzer.mitigation_mode = _mitigation_mode
@@ -327,6 +329,10 @@ func _parse_args() -> void:
 			_current_frame_solver_enabled = true
 		elif arg == "--no-solver" or arg == "--no-current-frame-solver":
 			_current_frame_solver_enabled = false
+		elif arg == "--preview-solver" or arg == "--no-analytic-solver":
+			_analytic_solver_enabled = false
+		elif arg == "--analytic-solver":
+			_analytic_solver_enabled = true
 		elif arg == "--live-cadence":
 			_live_cadence = true
 		elif arg.begins_with("--max-seconds="):
