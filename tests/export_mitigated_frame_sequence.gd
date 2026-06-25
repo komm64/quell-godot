@@ -27,6 +27,10 @@ var _mitigation_mode: int = RuntimeAnalyzerClass.MitigationMode.CURRENT_FRAME_ON
 var _temporal_blend_alpha: float = 0.50
 var _current_frame_solver_enabled := false
 var _analytic_solver_enabled := false
+var _raw_spatial_override_enabled := true
+var _after_spatial_override_enabled := true
+var _solver_preview_spatial_readback_enabled := true
+var _match_source_size := false
 var _live_cadence := false
 var _max_seconds := 0.0
 var _max_frames := 0
@@ -65,6 +69,14 @@ func _init() -> void:
 		push_error("No input frame_*.png files found: %s" % input_abs)
 		quit(1)
 		return
+	if _match_source_size:
+		var first_image := _load_image(String(frame_paths[0]))
+		if first_image == null:
+			_failed = true
+			quit(1)
+			return
+		_display_size = Vector2i(first_image.get_width(), first_image.get_height())
+		_analysis_size = _display_size
 
 	var manifest := _export_frames(frame_paths, raw_dir, after_dir, output_abs)
 	_write_json(output_abs.path_join("manifest.json"), manifest)
@@ -86,7 +98,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	var solver_after_analyzer = RuntimeAnalyzerClass.new()
 	var current_frame_solver = CurrentFrameSolverClass.new()
 	current_frame_solver.enabled = _current_frame_solver_enabled
-	current_frame_solver.analytic_enabled = _analytic_solver_enabled
+	if _object_has_property(current_frame_solver, "analytic_enabled"):
+		current_frame_solver.analytic_enabled = _analytic_solver_enabled
 	analyzer.headroom_margin = DEFAULT_TARGET_RISK
 	analyzer.local_correction_enabled = true
 	analyzer.mitigation_mode = _mitigation_mode
@@ -164,7 +177,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 						pipeline.after_texture,
 						held_after,
 						analysis_delta,
-						time_seconds
+						time_seconds,
+						_after_spatial_override_enabled
 					)
 					analyzer.apply_after_feedback(float(held_after_metrics.get("raw_risk", 0.0)), analysis_delta, held_after_metrics)
 					max_after_risk = max(max_after_risk, float(held_after_metrics.get("raw_risk", 0.0)))
@@ -192,7 +206,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 
 		var raw_gpu_metrics: Dictionary = raw_gpu.analyze_texture(pipeline.analysis_source_texture, time_seconds)
 		raw_gpu_metrics["source_kind"] = "frame_sequence"
-		analyzer.apply_spatial_image_override(raw_gpu_metrics, source_image)
+		if _raw_spatial_override_enabled:
+			analyzer.apply_spatial_image_override(raw_gpu_metrics, source_image)
 		var runtime_metrics: Dictionary = analyzer.update_from_metrics(raw_gpu_metrics, analysis_delta, time_seconds)
 		var shader_parameters: Dictionary = analyzer.shader_parameters(runtime_metrics)
 		var solver_result: Dictionary = current_frame_solver.solve(
@@ -205,7 +220,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			time_seconds,
 			"frame_sequence",
 			null,
-			true,
+			_solver_preview_spatial_readback_enabled,
 			runtime_metrics
 		)
 		shader_parameters = solver_result.get("parameters", shader_parameters)
@@ -228,7 +243,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			pipeline.after_texture,
 			after_output_image,
 			1.0 / _output_fps,
-			time_seconds
+			time_seconds,
+			_after_spatial_override_enabled
 		)
 		analyzer.apply_after_feedback(float(measured_after.get("raw_risk", 0.0)), 1.0 / _output_fps, measured_after)
 
@@ -279,6 +295,10 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		"output_frames": output_frames,
 		"analyzed_frames": analyzed_frames,
 		"live_cadence": _live_cadence,
+		"demo_runtime": _match_source_size and is_equal_approx(_output_fps, 60.0) and not _raw_spatial_override_enabled and not _after_spatial_override_enabled and not _solver_preview_spatial_readback_enabled,
+		"raw_spatial_override_enabled": _raw_spatial_override_enabled,
+		"after_spatial_override_enabled": _after_spatial_override_enabled,
+		"solver_preview_spatial_readback_enabled": _solver_preview_spatial_readback_enabled,
 		"summary": {
 			"max_raw_risk": snapped(max_raw_risk, 0.001),
 			"max_after_risk": snapped(max_after_risk, 0.001),
@@ -333,6 +353,21 @@ func _parse_args() -> void:
 			_analytic_solver_enabled = false
 		elif arg == "--analytic-solver":
 			_analytic_solver_enabled = true
+		elif arg == "--demo-runtime":
+			_output_fps = 60.0
+			_live_cadence = true
+			_match_source_size = true
+			_raw_spatial_override_enabled = false
+			_after_spatial_override_enabled = false
+			_solver_preview_spatial_readback_enabled = false
+		elif arg == "--match-source-size":
+			_match_source_size = true
+		elif arg == "--no-raw-spatial-override":
+			_raw_spatial_override_enabled = false
+		elif arg == "--no-after-spatial-override":
+			_after_spatial_override_enabled = false
+		elif arg == "--no-solver-spatial-readback":
+			_solver_preview_spatial_readback_enabled = false
 		elif arg == "--live-cadence":
 			_live_cadence = true
 		elif arg.begins_with("--max-seconds="):
@@ -346,6 +381,12 @@ func _argument_value(arg: String, prefix: String, args: PackedStringArray, index
 	if value.is_empty() and index + 1 < args.size():
 		return String(args[index + 1])
 	return value
+
+func _object_has_property(object: Object, property_name: String) -> bool:
+	for property in object.get_property_list():
+		if String(property.get("name", "")) == property_name:
+			return true
+	return false
 
 func _globalize_path(path: String) -> String:
 	if path.begins_with("res://"):
@@ -441,12 +482,13 @@ func _measure_visible_after_frame(
 	after_texture: Texture2DRD,
 	after_image: Image,
 	delta: float,
-	time_seconds: float
+	time_seconds: float,
+	use_spatial_override: bool = true
 ) -> Dictionary:
 	var after_gpu_metrics: Dictionary = after_gpu.analyze_texture(after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after-visible"
 	after_gpu_metrics["source_kind"] = "frame_sequence"
-	if after_image != null:
+	if use_spatial_override and after_image != null:
 		after_analyzer.apply_spatial_image_override(after_gpu_metrics, after_image)
 	return after_analyzer.update_from_metrics(after_gpu_metrics, delta, time_seconds)
 
@@ -497,7 +539,8 @@ func _measure_saved_after_sequence(after_dir: String, after_csv_path: String) ->
 			pipeline.analysis_source_texture,
 			image,
 			1.0 / _output_fps,
-			time_seconds
+			time_seconds,
+			_after_spatial_override_enabled
 		)
 		max_after_risk = max(max_after_risk, float(measured_after.get("raw_risk", 0.0)))
 		max_after_luminance = max(max_after_luminance, float(measured_after.get("luminance", 0.0)))
