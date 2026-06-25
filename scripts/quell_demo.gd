@@ -80,7 +80,10 @@ const PRIVATE_FRAME_SEQUENCE_SOURCES: Array[Dictionary] = [
 ]
 
 const FRAME_CACHE_LIMIT: int = 384
-const ANALYSIS_SCALE_DIVISOR: int = 4
+const DEFAULT_ANALYSIS_SCALE_DIVISOR: int = 4
+const GAME_BUDGET_ANALYSIS_SCALE_DIVISOR: int = 8
+const GAME_BUDGET_RAW_ANALYSIS_INTERVAL_FRAMES: int = 3
+const GAME_BUDGET_AFTER_FEEDBACK_INTERVAL_FRAMES: int = 4
 const ENABLE_K64_IO_BY_DEFAULT: bool = false
 const ENABLE_FRAME_SEQUENCE_RAW_SPATIAL_CPU_OVERRIDE: bool = false
 const ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK: bool = false
@@ -96,6 +99,10 @@ var max_feedback_amount := 0.60
 var local_correction_enabled := true
 var preserve_source_hue := true
 var current_frame_solver_enabled := true
+var game_budget_mode_enabled := false
+var analysis_scale_divisor := DEFAULT_ANALYSIS_SCALE_DIVISOR
+var raw_analysis_interval_frames := 1
+var after_feedback_interval_frames := 1
 var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
 var headroom_margin := 0.80
@@ -162,9 +169,18 @@ func _ready() -> void:
 		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
+	game_budget_mode_enabled = _cmdline_has_flag("--quell-game-budget")
 	current_frame_solver_enabled = not (_cmdline_has_flag("--quell-no-solver") or _cmdline_has_flag("--quell-no-current-frame-solver"))
 	if _cmdline_has_flag("--quell-solver") or _cmdline_has_flag("--quell-current-frame-solver"):
 		current_frame_solver_enabled = true
+	if game_budget_mode_enabled:
+		current_frame_solver_enabled = false
+		analysis_scale_divisor = GAME_BUDGET_ANALYSIS_SCALE_DIVISOR
+		raw_analysis_interval_frames = GAME_BUDGET_RAW_ANALYSIS_INTERVAL_FRAMES
+		after_feedback_interval_frames = GAME_BUDGET_AFTER_FEEDBACK_INTERVAL_FRAMES
+	analysis_scale_divisor = max(1, _cmdline_int_value("--quell-analysis-divisor=", analysis_scale_divisor))
+	raw_analysis_interval_frames = max(1, _cmdline_int_value("--quell-raw-analysis-interval=", raw_analysis_interval_frames))
+	after_feedback_interval_frames = max(1, _cmdline_int_value("--quell-after-feedback-interval=", after_feedback_interval_frames))
 	analyzer = QuellAnalyzerClass.new()
 	after_analyzer = QuellAnalyzerClass.new()
 	gpu_analyzer = GpuAnalyzerClass.new()
@@ -351,6 +367,12 @@ func _cmdline_has_flag(flag: String) -> bool:
 		if arg == flag:
 			return true
 	return false
+
+func _cmdline_int_value(prefix: String, default_value: int) -> int:
+	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		if arg.begins_with(prefix):
+			return int(arg.substr(prefix.length()))
+	return default_value
 
 func _profile_add(key: String, usec: int) -> void:
 	if not _profile_enabled:
@@ -655,7 +677,7 @@ func _process(delta: float) -> void:
 				metrics = _last_frame_sequence_metrics.duplicate(false)
 				metrics["metric_backend"] = "gpu-frame-seq-cached"
 				_profile_add("cache_us", Time.get_ticks_usec() - cache_start)
-				if mitigation_enabled and gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null:
+				if mitigation_enabled and gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null and _should_measure_after_feedback():
 					_after_sample_count += 1
 					var held_after_start := Time.get_ticks_usec()
 					var held_after_metrics: Dictionary = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
@@ -671,6 +693,7 @@ func _process(delta: float) -> void:
 				_profile_add("hud_us", Time.get_ticks_usec() - cached_hud_start)
 				_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 				_profile_sample()
+				_capture_requested_frame_if_ready()
 				return
 			analysis_delta = max(_frame_sequence_pending_analysis_delta, delta)
 			_frame_sequence_pending_analysis_delta = 0.0
@@ -684,6 +707,25 @@ func _process(delta: float) -> void:
 			var generate_start := Time.get_ticks_usec()
 			gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
 			_profile_add("texture_us", Time.get_ticks_usec() - generate_start)
+		if _can_reuse_runtime_control(uploaded_sequence_frame):
+			metrics = _last_runtime_metrics.duplicate(false)
+			metrics["metric_backend"] = "gpu-frame-seq-reused" if uploaded_sequence_frame else "gpu-rd-reused"
+			shader_parameters = _last_shader_parameters.duplicate(false)
+			_apply_shader_parameter_metrics(metrics, shader_parameters)
+			var reuse_mitigate_start := Time.get_ticks_usec()
+			gpu_frame_pipeline.apply_mitigation(shader_parameters)
+			_profile_add("texture_us", Time.get_ticks_usec() - reuse_mitigate_start)
+			if not _last_after_metrics.is_empty():
+				var reuse_feedback_start := Time.get_ticks_usec()
+				_reuse_last_after_metrics(metrics, _last_after_metrics)
+				_profile_add("feedback_us", Time.get_ticks_usec() - reuse_feedback_start)
+			var reuse_hud_start := Time.get_ticks_usec()
+			_update_hud(metrics)
+			_profile_add("hud_us", Time.get_ticks_usec() - reuse_hud_start)
+			_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+			_profile_sample()
+			_capture_requested_frame_if_ready()
+			return
 		_raw_sample_count += 1
 		var analyze_start := Time.get_ticks_usec()
 		var raw_gpu_metrics: Dictionary = gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, elapsed_seconds)
@@ -728,13 +770,24 @@ func _process(delta: float) -> void:
 		var mitigate_start := Time.get_ticks_usec()
 		gpu_frame_pipeline.apply_mitigation(shader_parameters)
 		_profile_add("texture_us", Time.get_ticks_usec() - mitigate_start)
-		_after_sample_count += 1
+		var should_measure_after := not mitigation_enabled or _should_measure_after_feedback()
+		if should_measure_after:
+			_after_sample_count += 1
 		var after_analyze_start := Time.get_ticks_usec()
-		var after_metrics: Dictionary = metrics.duplicate(true) if not mitigation_enabled else _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+		var after_metrics: Dictionary = {}
+		if not mitigation_enabled:
+			after_metrics = metrics.duplicate(true)
+		elif should_measure_after:
+			after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+		else:
+			after_metrics = _last_after_metrics.duplicate(false)
 		_profile_add("analyze_us", Time.get_ticks_usec() - after_analyze_start)
 		var feedback_start := Time.get_ticks_usec()
-		_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
-		_last_after_metrics = after_metrics.duplicate(false)
+		if should_measure_after:
+			_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
+			_last_after_metrics = after_metrics.duplicate(false)
+		else:
+			_reuse_last_after_metrics(metrics, after_metrics)
 		_last_runtime_metrics = metrics.duplicate(false)
 		_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
 		if uploaded_sequence_frame:
@@ -751,6 +804,9 @@ func _process(delta: float) -> void:
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
 	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 	_profile_sample()
+	_capture_requested_frame_if_ready()
+
+func _capture_requested_frame_if_ready() -> void:
 	if _process_frame_count == 130 and OS.get_environment("QUELL_SHOT") != "":
 		var shot_img := get_viewport().get_texture().get_image()
 		if shot_img != null:
@@ -1109,6 +1165,23 @@ func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary
 	metrics["feedback_control"] = 1.0 - float(parameters.get("temporal_blend_alpha", 1.0))
 	metrics["local_correction"] = float(parameters.get("local_correction_strength", 0.0))
 
+func _should_measure_after_feedback() -> bool:
+	if after_feedback_interval_frames <= 1:
+		return true
+	return _process_frame_count % after_feedback_interval_frames == 0
+
+func _should_analyze_raw() -> bool:
+	if raw_analysis_interval_frames <= 1:
+		return true
+	return _process_frame_count % raw_analysis_interval_frames == 0
+
+func _can_reuse_runtime_control(_uploaded_sequence_frame: bool) -> bool:
+	if not game_budget_mode_enabled:
+		return false
+	if _last_runtime_metrics.is_empty() or _last_shader_parameters.is_empty():
+		return false
+	return not _should_analyze_raw()
+
 func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics["raw_risk"])
 	var output_risk: float = float(after_metrics["raw_risk"])
@@ -1123,6 +1196,24 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 	metrics["after_red_flash_count"] = after_metrics.get("red_flash_count", 0)
 	metrics["after_general_flash_area"] = after_metrics.get("general_flash_area", 0.0)
 	metrics["after_red_flash_area"] = after_metrics.get("red_flash_area", 0.0)
+
+func _reuse_last_after_metrics(metrics: Dictionary, after_metrics: Dictionary) -> void:
+	if after_metrics.is_empty():
+		metrics["output_risk"] = float(metrics.get("raw_risk", 0.0))
+		metrics["risk_reduction"] = 0.0
+		metrics["reduction_ratio"] = 0.0
+		return
+	var raw_risk: float = float(metrics.get("raw_risk", 0.0))
+	var output_risk: float = float(after_metrics.get("raw_risk", 0.0))
+	var risk_reduction: float = max(0.0, raw_risk - output_risk)
+	metrics["output_risk"] = output_risk
+	metrics["risk_reduction"] = risk_reduction
+	metrics["reduction_ratio"] = risk_reduction / max(raw_risk, 0.001)
+	metrics["after_general_flash_count"] = after_metrics.get("general_flash_count", 0)
+	metrics["after_red_flash_count"] = after_metrics.get("red_flash_count", 0)
+	metrics["after_general_flash_area"] = after_metrics.get("general_flash_area", 0.0)
+	metrics["after_red_flash_area"] = after_metrics.get("red_flash_area", 0.0)
+	metrics["after_feedback_reused"] = true
 
 func _update_hud(metrics: Dictionary) -> void:
 	if elapsed_seconds + 0.0001 < _next_hud_update_time:
@@ -1141,7 +1232,7 @@ func _update_hud(metrics: Dictionary) -> void:
 	var drop_percent := roundi(float(metrics["reduction_ratio"]) * 100.0)
 	var display_size := _display_size()
 	var analysis_size := _analysis_size_for_display(display_size)
-	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
+	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / budget %s div %d raw/%d after/%d / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
 		state,
 		_render_backend_label(),
 		"%dx%d" % [display_size.x, display_size.y],
@@ -1149,6 +1240,10 @@ func _update_hud(metrics: Dictionary) -> void:
 		"on" if local_correction_enabled else "off",
 		"raw" if preserve_source_hue else "off",
 		"on" if current_frame_solver_enabled else "off",
+		"on" if game_budget_mode_enabled else "off",
+		analysis_scale_divisor,
+		raw_analysis_interval_frames,
+		after_feedback_interval_frames,
 		_mitigation_mode_label(),
 		_spatial_sensitivity_label(),
 		String(metrics.get("metric_backend", "generated")),
@@ -1532,8 +1627,8 @@ func _display_size() -> Vector2i:
 
 func _analysis_size_for_display(display_size: Vector2i) -> Vector2i:
 	return Vector2i(
-		max(1, int(ceil(float(display_size.x) / float(ANALYSIS_SCALE_DIVISOR)))),
-		max(1, int(ceil(float(display_size.y) / float(ANALYSIS_SCALE_DIVISOR))))
+		max(1, int(ceil(float(display_size.x) / float(max(1, analysis_scale_divisor))))),
+		max(1, int(ceil(float(display_size.y) / float(max(1, analysis_scale_divisor)))))
 	)
 
 func _refresh_static_labels() -> void:
