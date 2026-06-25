@@ -1350,7 +1350,7 @@ func _reset_frame_sequence_playback() -> void:
 	_last_frame_sequence_metrics.clear()
 
 func _measure_after_for_source(source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
-	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.after_texture, time_seconds)
+	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after"
 	if _is_frame_sequence_source(source):
 		after_gpu_metrics["source_kind"] = "frame_sequence"
@@ -1474,7 +1474,7 @@ func _has_gpu_frame_pipeline() -> bool:
 		and gpu_frame_pipeline.after_texture != null
 		and gpu_frame_pipeline.analysis_source_texture != null
 		and gpu_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_source_texture)
-		and gpu_after_analyzer.can_analyze_texture(gpu_frame_pipeline.after_texture)
+		and gpu_after_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_after_texture)
 	)
 
 func _render_backend_label() -> String:
