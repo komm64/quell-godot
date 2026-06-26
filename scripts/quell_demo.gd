@@ -81,10 +81,13 @@ const PRIVATE_FRAME_SEQUENCE_SOURCES: Array[Dictionary] = [
 
 const FRAME_CACHE_LIMIT: int = 384
 const ANALYSIS_SCALE_DIVISOR: int = 4
+const GAME_BUDGET_ANALYSIS_SCALE_DIVISOR: int = 8
 const ENABLE_K64_IO_BY_DEFAULT: bool = false
 const ENABLE_FRAME_SEQUENCE_RAW_SPATIAL_CPU_OVERRIDE: bool = false
 const ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK: bool = false
 const HUD_UPDATE_HZ: float = 10.0
+const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
+const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 6
 var elapsed_seconds := 0.0
 var current_mode := 0
 var mitigation_enabled := true
@@ -96,6 +99,8 @@ var max_feedback_amount := 0.60
 var local_correction_enabled := true
 var preserve_source_hue := true
 var current_frame_solver_enabled := true
+var game_budget_enabled := false
+var game_budget_policy := 0
 var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
 var headroom_margin := 0.80
@@ -117,6 +122,8 @@ var mitigation_toggle: CheckButton
 var local_correction_toggle: CheckButton
 var hue_preserve_toggle: CheckButton
 var current_frame_solver_toggle: CheckButton
+var game_budget_toggle: CheckButton
+var game_budget_policy_select: OptionButton
 var distance_value_label: Label
 var headroom_value_label: Label
 var temporal_blend_value_label: Label
@@ -149,6 +156,8 @@ var _last_frame_sequence_metrics: Dictionary = {}
 var _last_runtime_metrics: Dictionary = {}
 var _last_after_metrics: Dictionary = {}
 var _last_shader_parameters: Dictionary = {}
+var _last_raw_sample_frame: int = -999999
+var _last_after_sample_frame: int = -999999
 var _next_hud_update_time: float = 0.0
 var _profile_enabled: bool = false
 var _profile_accum: Dictionary = {}
@@ -162,6 +171,10 @@ func _ready() -> void:
 		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
+	game_budget_enabled = _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode")
+	var game_budget_policy_arg := _cmdline_arg_value("--quell-game-budget-policy=", "")
+	if _cmdline_has_flag("--quell-game-budget-atf") or not game_budget_policy_arg.is_empty():
+		game_budget_enabled = true
 	current_frame_solver_enabled = not (_cmdline_has_flag("--quell-no-solver") or _cmdline_has_flag("--quell-no-current-frame-solver"))
 	if _cmdline_has_flag("--quell-solver") or _cmdline_has_flag("--quell-current-frame-solver"):
 		current_frame_solver_enabled = true
@@ -172,6 +185,11 @@ func _ready() -> void:
 	current_frame_solver = CurrentFrameSolverClass.new()
 	gpu_frame_pipeline = GpuFramePipelineClass.new()
 	mitigation_mode = QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY
+	game_budget_policy = QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+	if not game_budget_policy_arg.is_empty():
+		game_budget_policy = _parse_game_budget_policy(game_budget_policy_arg)
+	if _cmdline_has_flag("--quell-game-budget-atf"):
+		game_budget_policy = QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
 	spatial_sensitivity = QuellAnalyzerClass.SpatialSensitivity.BALANCED
 	contribution_enabled = _default_contribution_enabled()
 	_mode_configs = MODE_CONFIGS.duplicate(true)
@@ -278,6 +296,8 @@ func _start_k64_io() -> void:
 			{"name": "local_correction_enabled", "type": "bool", "doc": "local correction toggle"},
 			{"name": "preserve_source_hue", "type": "bool", "doc": "Raw hue reconstruction toggle"},
 			{"name": "current_frame_solver_enabled", "type": "bool", "doc": "CurrentFrame preview solver toggle"},
+			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency game budget mode toggle"},
+			{"name": "game_budget_policy_label", "type": "string", "doc": "game-budget filter policy"},
 			{"name": "spatial_sensitivity", "type": "int", "doc": "QuellAnalyzer.SpatialSensitivity enum value"},
 			{"name": "render_backend", "type": "string", "doc": "active Quell output backend"},
 			{"name": "display_size", "type": "string", "doc": "current output texture size"},
@@ -320,6 +340,12 @@ func _start_k64_io() -> void:
 	io.call("register_action", "quell_set_current_frame_solver", Callable(self, "_act_k64_set_current_frame_solver"), {
 		"args": [{"name": "enabled", "type": "bool"}],
 	})
+	io.call("register_action", "quell_set_game_budget", Callable(self, "_act_k64_set_game_budget"), {
+		"args": [{"name": "enabled", "type": "bool"}],
+	})
+	io.call("register_action", "quell_set_game_budget_policy", Callable(self, "_act_k64_set_game_budget_policy"), {
+		"args": [{"name": "policy", "type": "int|string"}],
+	})
 	io.call("register_action", "quell_restart_video", Callable(self, "_act_k64_restart_video"), {
 		"args": [],
 	})
@@ -349,6 +375,20 @@ func _k64_io_enabled() -> bool:
 func _cmdline_has_flag(flag: String) -> bool:
 	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		if arg == flag:
+			return true
+	return false
+
+func _cmdline_arg_value(prefix: String, fallback: String) -> String:
+	for arg in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		if arg.begins_with(prefix):
+			return arg.trim_prefix(prefix)
+	return fallback
+
+func _object_has_property(object: Object, property_name: String) -> bool:
+	if object == null:
+		return false
+	for property in object.get_property_list():
+		if String(property.get("name", "")) == property_name:
 			return true
 	return false
 
@@ -411,7 +451,9 @@ func _initial_mode_index() -> int:
 func _provide_k64_status() -> Dictionary:
 	var source := _current_source_config()
 	var display_size := _display_size()
-	var analysis_size := _analysis_size_for_display(display_size)
+	var analysis_size: Vector2i = _analysis_size_for_display(display_size)
+	if gpu_frame_pipeline != null:
+		analysis_size = gpu_frame_pipeline.get_analysis_size()
 	return {
 		"source": String(source.get("name", "")),
 		"mitigation_enabled": mitigation_enabled,
@@ -424,6 +466,9 @@ func _provide_k64_status() -> Dictionary:
 		"local_correction_enabled": local_correction_enabled,
 		"preserve_source_hue": preserve_source_hue,
 		"current_frame_solver_enabled": current_frame_solver_enabled,
+		"game_budget_enabled": game_budget_enabled,
+		"game_budget_policy": int(game_budget_policy),
+		"game_budget_policy_label": _game_budget_policy_label(),
 		"spatial_sensitivity": int(spatial_sensitivity),
 		"render_backend": _render_backend_label(),
 		"display_size": "%dx%d" % [display_size.x, display_size.y],
@@ -431,7 +476,7 @@ func _provide_k64_status() -> Dictionary:
 		"pipeline_display_size": "%dx%d" % [gpu_frame_pipeline.get_display_size().x, gpu_frame_pipeline.get_display_size().y] if gpu_frame_pipeline != null else "",
 		"pipeline_analysis_size": "%dx%d" % [gpu_frame_pipeline.get_analysis_size().x, gpu_frame_pipeline.get_analysis_size().y] if gpu_frame_pipeline != null else "",
 		"raw_risk": float(_last_runtime_metrics.get("raw_risk", 0.0)),
-		"after_risk": float(_last_after_metrics.get("raw_risk", _last_runtime_metrics.get("solver_after_risk", 0.0))),
+		"after_risk": float(_last_runtime_metrics.get("output_risk", _last_after_metrics.get("estimated_raw_risk", _last_after_metrics.get("raw_risk", _last_runtime_metrics.get("solver_after_risk", 0.0))))),
 		"solver_correction_scale": float(_last_runtime_metrics.get("solver_correction_scale", 0.0)),
 		"solver_identity_after_risk": float(_last_runtime_metrics.get("solver_identity_after_risk", 0.0)),
 		"solver_after_risk": float(_last_runtime_metrics.get("solver_after_risk", 0.0)),
@@ -567,6 +612,24 @@ func _act_k64_set_current_frame_solver(args: Dictionary) -> Dictionary:
 	_reset_analysis_state()
 	return _provide_k64_status()
 
+func _act_k64_set_game_budget(args: Dictionary) -> Dictionary:
+	game_budget_enabled = bool(args.get("enabled", args.get("value", game_budget_enabled)))
+	if game_budget_toggle != null:
+		game_budget_toggle.set_pressed_no_signal(game_budget_enabled)
+	if game_budget_enabled and _is_frame_sequence_source(_current_source_config()):
+		_preload_frame_sequence(_current_source_config())
+	_sync_analyzer_settings()
+	_ensure_gpu_frame_pipeline_size(_current_source_config())
+	_reset_analysis_state()
+	return _provide_k64_status()
+
+func _act_k64_set_game_budget_policy(args: Dictionary) -> Dictionary:
+	game_budget_policy = _parse_game_budget_policy(args.get("policy", args.get("value", game_budget_policy)))
+	_select_option_by_item_id(game_budget_policy_select, int(game_budget_policy))
+	_sync_analyzer_settings()
+	_reset_analysis_state()
+	return _provide_k64_status()
+
 func _act_k64_restart_video(_args: Dictionary) -> Dictionary:
 	_on_restart_video_pressed()
 	return _provide_k64_status()
@@ -635,7 +698,7 @@ func _process(delta: float) -> void:
 		else:
 			metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
 			metrics["metric_backend"] = "generated"
-		shader_parameters = analyzer.shader_parameters(metrics)
+		shader_parameters = _shader_parameters_for_metrics(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
 	elif has_gpu_frame_pipeline:
 		var ensure_start := Time.get_ticks_usec()
@@ -656,10 +719,15 @@ func _process(delta: float) -> void:
 				metrics["metric_backend"] = "gpu-frame-seq-cached"
 				_profile_add("cache_us", Time.get_ticks_usec() - cache_start)
 				if mitigation_enabled and gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null:
-					_after_sample_count += 1
-					var held_after_start := Time.get_ticks_usec()
-					var held_after_metrics: Dictionary = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
-					_profile_add("analyze_us", Time.get_ticks_usec() - held_after_start)
+					var held_after_metrics: Dictionary
+					if _should_measure_after(metrics):
+						_after_sample_count += 1
+						_last_after_sample_frame = _process_frame_count
+						var held_after_start := Time.get_ticks_usec()
+						held_after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+						_profile_add("analyze_us", Time.get_ticks_usec() - held_after_start)
+					else:
+						held_after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-held-skip")
 					var held_feedback_start := Time.get_ticks_usec()
 					_apply_measured_after_metrics(metrics, held_after_metrics, after_analysis_delta)
 					_last_after_metrics = held_after_metrics.duplicate(false)
@@ -684,7 +752,40 @@ func _process(delta: float) -> void:
 			var generate_start := Time.get_ticks_usec()
 			gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
 			_profile_add("texture_us", Time.get_ticks_usec() - generate_start)
+		if not _should_sample_raw():
+			var reuse_start := Time.get_ticks_usec()
+			metrics = _last_runtime_metrics.duplicate(false)
+			metrics["time"] = elapsed_seconds
+			metrics["metric_backend"] = "gpu-game-budget-raw-held"
+			shader_parameters = _last_shader_parameters.duplicate(false)
+			_profile_add("cache_us", Time.get_ticks_usec() - reuse_start)
+			var held_mitigate_start := Time.get_ticks_usec()
+			gpu_frame_pipeline.apply_mitigation(shader_parameters)
+			_profile_add("texture_us", Time.get_ticks_usec() - held_mitigate_start)
+			var held_after_start := Time.get_ticks_usec()
+			var skipped_after_metrics: Dictionary
+			if mitigation_enabled and _should_measure_after(metrics):
+				_after_sample_count += 1
+				_last_after_sample_frame = _process_frame_count
+				skipped_after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+			else:
+				skipped_after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-raw-held-skip")
+			_profile_add("analyze_us", Time.get_ticks_usec() - held_after_start)
+			var skipped_feedback_start := Time.get_ticks_usec()
+			_apply_measured_after_metrics(metrics, skipped_after_metrics, after_analysis_delta)
+			_last_after_metrics = skipped_after_metrics.duplicate(false)
+			_last_runtime_metrics = metrics.duplicate(false)
+			if uploaded_sequence_frame:
+				_last_frame_sequence_metrics = metrics.duplicate(false)
+			_profile_add("feedback_us", Time.get_ticks_usec() - skipped_feedback_start)
+			var skipped_hud_start := Time.get_ticks_usec()
+			_update_hud(metrics)
+			_profile_add("hud_us", Time.get_ticks_usec() - skipped_hud_start)
+			_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+			_profile_sample()
+			return
 		_raw_sample_count += 1
+		_last_raw_sample_frame = _process_frame_count
 		var analyze_start := Time.get_ticks_usec()
 		var raw_gpu_metrics: Dictionary = gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, elapsed_seconds)
 		_profile_add("analyze_us", Time.get_ticks_usec() - analyze_start)
@@ -705,7 +806,7 @@ func _process(delta: float) -> void:
 		_profile_add("controller_us", Time.get_ticks_usec() - controller_start)
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		var shader_start := Time.get_ticks_usec()
-		shader_parameters = analyzer.shader_parameters(metrics)
+		shader_parameters = _shader_parameters_for_metrics(metrics)
 		var solver_result: Dictionary = current_frame_solver.solve(
 			gpu_frame_pipeline,
 			gpu_after_analyzer,
@@ -728,9 +829,16 @@ func _process(delta: float) -> void:
 		var mitigate_start := Time.get_ticks_usec()
 		gpu_frame_pipeline.apply_mitigation(shader_parameters)
 		_profile_add("texture_us", Time.get_ticks_usec() - mitigate_start)
-		_after_sample_count += 1
 		var after_analyze_start := Time.get_ticks_usec()
-		var after_metrics: Dictionary = metrics.duplicate(true) if not mitigation_enabled else _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+		var after_metrics: Dictionary
+		if not mitigation_enabled:
+			after_metrics = metrics.duplicate(true)
+		elif _should_measure_after(metrics):
+			_after_sample_count += 1
+			_last_after_sample_frame = _process_frame_count
+			after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+		else:
+			after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-skip")
 		_profile_add("analyze_us", Time.get_ticks_usec() - after_analyze_start)
 		var feedback_start := Time.get_ticks_usec()
 		_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
@@ -744,7 +852,7 @@ func _process(delta: float) -> void:
 	else:
 		metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
 		metrics["metric_backend"] = "generated"
-		shader_parameters = analyzer.shader_parameters(metrics)
+		shader_parameters = _shader_parameters_for_metrics(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
 	var hud_start := Time.get_ticks_usec()
 	_update_hud(metrics)
@@ -896,6 +1004,19 @@ func _build_hud() -> void:
 	current_frame_solver_toggle.button_pressed = current_frame_solver_enabled
 	current_frame_solver_toggle.toggled.connect(_on_current_frame_solver_toggled)
 	stack.add_child(current_frame_solver_toggle)
+
+	game_budget_toggle = CheckButton.new()
+	game_budget_toggle.text = "Game budget"
+	game_budget_toggle.button_pressed = game_budget_enabled
+	game_budget_toggle.toggled.connect(_on_game_budget_toggled)
+	stack.add_child(game_budget_toggle)
+
+	game_budget_policy_select = OptionButton.new()
+	game_budget_policy_select.add_item("Direct brightness", QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS)
+	game_budget_policy_select.add_item("Adaptive temporal filter", QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER)
+	_select_option_by_item_id(game_budget_policy_select, int(game_budget_policy))
+	game_budget_policy_select.item_selected.connect(_on_game_budget_policy_selected)
+	stack.add_child(_with_caption("Budget filter", game_budget_policy_select))
 
 	stack.add_child(_reset_controls())
 	stack.add_child(_contribution_controls())
@@ -1109,11 +1230,17 @@ func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary
 	metrics["feedback_control"] = 1.0 - float(parameters.get("temporal_blend_alpha", 1.0))
 	metrics["local_correction"] = float(parameters.get("local_correction_strength", 0.0))
 
+func _shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
+	if game_budget_enabled and analyzer != null and analyzer.has_method("game_budget_shader_parameters"):
+		return analyzer.game_budget_shader_parameters(metrics)
+	return analyzer.shader_parameters(metrics)
+
 func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics["raw_risk"])
-	var output_risk: float = float(after_metrics["raw_risk"])
+	var measured_output_risk: float = float(after_metrics["raw_risk"])
+	var output_risk: float = _visible_after_risk_for_metrics(metrics, after_metrics)
 	var risk_reduction: float = max(0.0, raw_risk - output_risk)
-	analyzer.apply_after_feedback(output_risk, delta, after_metrics)
+	analyzer.apply_after_feedback(measured_output_risk, delta, after_metrics)
 
 	metrics["output_risk"] = output_risk
 	metrics["risk_reduction"] = risk_reduction
@@ -1123,6 +1250,12 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 	metrics["after_red_flash_count"] = after_metrics.get("red_flash_count", 0)
 	metrics["after_general_flash_area"] = after_metrics.get("general_flash_area", 0.0)
 	metrics["after_red_flash_area"] = after_metrics.get("red_flash_area", 0.0)
+
+func _visible_after_risk_for_metrics(metrics: Dictionary, after_metrics: Dictionary) -> float:
+	var measured_risk: float = float(after_metrics.get("raw_risk", 0.0))
+	if game_budget_enabled and metrics.has("solver_after_risk"):
+		return min(measured_risk, float(metrics.get("solver_after_risk", measured_risk)))
+	return measured_risk
 
 func _update_hud(metrics: Dictionary) -> void:
 	if elapsed_seconds + 0.0001 < _next_hud_update_time:
@@ -1140,8 +1273,10 @@ func _update_hud(metrics: Dictionary) -> void:
 	var state := "off" if not mitigation_enabled else ("active" if float(metrics["mitigation"]) > 0.01 else "idle")
 	var drop_percent := roundi(float(metrics["reduction_ratio"]) * 100.0)
 	var display_size := _display_size()
-	var analysis_size := _analysis_size_for_display(display_size)
-	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
+	var analysis_size: Vector2i = _analysis_size_for_display(display_size)
+	if gpu_frame_pipeline != null:
+		analysis_size = gpu_frame_pipeline.get_analysis_size()
+	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / budget %s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
 		state,
 		_render_backend_label(),
 		"%dx%d" % [display_size.x, display_size.y],
@@ -1149,6 +1284,7 @@ func _update_hud(metrics: Dictionary) -> void:
 		"on" if local_correction_enabled else "off",
 		"raw" if preserve_source_hue else "off",
 		"on" if current_frame_solver_enabled else "off",
+		_game_budget_policy_label() if game_budget_enabled else "off",
 		_mitigation_mode_label(),
 		_spatial_sensitivity_label(),
 		String(metrics.get("metric_backend", "generated")),
@@ -1176,6 +1312,8 @@ func _apply_mode(index: int) -> void:
 		_set_content_shader_parameter("red_hz", float(config["red_hz"]))
 		_set_content_shader_parameter("stripe_cycles", float(config["stripe_cycles"]))
 		_set_content_shader_parameter("unsafe_area", float(config["unsafe_area"]))
+	if game_budget_enabled and _is_frame_sequence_source(config):
+		_preload_frame_sequence(config)
 	_reset_analysis_state()
 
 func _demo_risk_envelope(cycle_hz: float) -> float:
@@ -1194,6 +1332,8 @@ func _sync_analyzer_settings() -> void:
 	analyzer.local_correction_enabled = local_correction_enabled
 	analyzer.preserve_source_hue = preserve_source_hue
 	analyzer.spatial_sensitivity = spatial_sensitivity
+	if _object_has_property(analyzer, "game_budget_policy"):
+		analyzer.game_budget_policy = game_budget_policy
 	_apply_contribution_settings(analyzer)
 	after_analyzer.viewing_distance_m = viewing_distance_m
 	after_analyzer.headroom_margin = headroom_margin
@@ -1210,6 +1350,10 @@ func _sync_analyzer_settings() -> void:
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
 	current_frame_solver.enabled = current_frame_solver_enabled
+	if _object_has_property(current_frame_solver, "game_budget_enabled"):
+		current_frame_solver.game_budget_enabled = game_budget_enabled
+	if _object_has_property(current_frame_solver, "fast_identity_enabled"):
+		current_frame_solver.fast_identity_enabled = game_budget_enabled
 
 func _default_contribution_enabled() -> Dictionary:
 	return {
@@ -1244,6 +1388,8 @@ func _reset_history_state(reset_graph: bool = true) -> void:
 	_last_runtime_metrics.clear()
 	_last_after_metrics.clear()
 	_last_shader_parameters.clear()
+	_last_raw_sample_frame = -999999
+	_last_after_sample_frame = -999999
 	if reset_graph and risk_graph != null:
 		risk_graph.reset()
 
@@ -1309,6 +1455,8 @@ func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
 			_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
 			_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
 			_frame_sequence_frame_changed = advance_count > 0
+	if game_budget_enabled and not _frame_sequence_frame_changed:
+		return null
 	var frame_path := String(frame_paths[_frame_sequence_index])
 	return _load_frame_sequence_path(frame_path)
 
@@ -1341,6 +1489,12 @@ func _load_frame_sequence_path(frame_path: String):
 		_frame_cache.erase(evicted_path)
 	return image
 
+func _preload_frame_sequence(config: Dictionary) -> void:
+	var source_id := String(config.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	for frame_path in frame_paths:
+		_load_frame_sequence_path(String(frame_path))
+
 func _reset_frame_sequence_playback() -> void:
 	_frame_sequence_active_id = ""
 	_frame_sequence_index = 0
@@ -1348,6 +1502,36 @@ func _reset_frame_sequence_playback() -> void:
 	_frame_sequence_frame_changed = false
 	_frame_sequence_pending_analysis_delta = 0.0
 	_last_frame_sequence_metrics.clear()
+
+func _should_measure_after(metrics: Dictionary) -> bool:
+	if not game_budget_enabled:
+		return true
+	if _last_after_metrics.is_empty():
+		return true
+	var frames_since_sample: int = _process_frame_count - _last_after_sample_frame
+	if frames_since_sample >= GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES:
+		return true
+	if float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))) >= headroom_margin and frames_since_sample >= maxi(2, int(GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES / 2)):
+		return true
+	return false
+
+func _should_sample_raw() -> bool:
+	if not game_budget_enabled:
+		return true
+	if _last_runtime_metrics.is_empty() or _last_shader_parameters.is_empty():
+		return true
+	return _process_frame_count - _last_raw_sample_frame >= GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES
+
+func _held_after_metrics(metrics: Dictionary, _delta: float, source_label: String) -> Dictionary:
+	var after_metrics: Dictionary = _last_after_metrics.duplicate(true) if not _last_after_metrics.is_empty() else metrics.duplicate(true)
+	if not after_metrics.has("raw_risk"):
+		after_metrics["raw_risk"] = float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))
+	var solver_estimate: float = float(metrics.get("solver_after_risk", metrics.get("raw_risk", after_metrics.get("raw_risk", 0.0))))
+	after_metrics["estimated_raw_risk"] = max(float(after_metrics.get("raw_risk", 0.0)), solver_estimate)
+	after_metrics["source"] = source_label
+	after_metrics["measurement_skipped"] = true
+	after_metrics["time"] = elapsed_seconds
+	return after_metrics
 
 func _measure_after_for_source(source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
 	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, time_seconds)
@@ -1505,6 +1689,8 @@ func _ensure_gpu_frame_pipeline_size(source: Dictionary) -> void:
 		_reset_analysis_state(false)
 
 func _pipeline_display_size_for_source(source: Dictionary) -> Vector2i:
+	if game_budget_enabled:
+		return _display_size()
 	if _is_frame_sequence_source(source):
 		var source_id := String(source.get("id", ""))
 		var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
@@ -1515,7 +1701,9 @@ func _pipeline_display_size_for_source(source: Dictionary) -> Vector2i:
 	return _display_size()
 
 func _pipeline_analysis_size_for_source(source: Dictionary, display_size: Vector2i) -> Vector2i:
-	if _is_frame_sequence_source(source):
+	if game_budget_enabled:
+		return _analysis_size_for_display_with_divisor(display_size, GAME_BUDGET_ANALYSIS_SCALE_DIVISOR)
+	if _is_frame_sequence_source(source) and not game_budget_enabled:
 		return display_size
 	return _analysis_size_for_display(display_size)
 
@@ -1531,9 +1719,13 @@ func _display_size() -> Vector2i:
 	return Vector2i(max(1, window_size.x), max(1, window_size.y))
 
 func _analysis_size_for_display(display_size: Vector2i) -> Vector2i:
+	return _analysis_size_for_display_with_divisor(display_size, ANALYSIS_SCALE_DIVISOR)
+
+func _analysis_size_for_display_with_divisor(display_size: Vector2i, divisor: int) -> Vector2i:
+	divisor = maxi(1, divisor)
 	return Vector2i(
-		max(1, int(ceil(float(display_size.x) / float(ANALYSIS_SCALE_DIVISOR)))),
-		max(1, int(ceil(float(display_size.y) / float(ANALYSIS_SCALE_DIVISOR))))
+		max(1, int(ceil(float(display_size.x) / float(divisor)))),
+		max(1, int(ceil(float(display_size.y) / float(divisor))))
 	)
 
 func _refresh_static_labels() -> void:
@@ -1581,6 +1773,32 @@ func _on_current_frame_solver_toggled(enabled: bool) -> void:
 	current_frame_solver_enabled = enabled
 	_sync_analyzer_settings()
 	_reset_analysis_state()
+
+func _on_game_budget_toggled(enabled: bool) -> void:
+	game_budget_enabled = enabled
+	if game_budget_enabled and _is_frame_sequence_source(_current_source_config()):
+		_preload_frame_sequence(_current_source_config())
+	_sync_analyzer_settings()
+	_ensure_gpu_frame_pipeline_size(_current_source_config())
+	_reset_analysis_state()
+
+func _on_game_budget_policy_selected(index: int) -> void:
+	game_budget_policy = game_budget_policy_select.get_item_id(index)
+	_sync_analyzer_settings()
+	_reset_analysis_state()
+
+func _parse_game_budget_policy(value: Variant) -> int:
+	if value is String:
+		var text := String(value).to_lower()
+		if text == "atf" or text == "adaptive" or text == "adaptive_temporal_filter":
+			return QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+		return QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS
+	return clampi(int(value), QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS, QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER)
+
+func _game_budget_policy_label() -> String:
+	if game_budget_policy == QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER:
+		return "atf"
+	return "direct"
 
 func _on_restart_video_pressed() -> void:
 	elapsed_seconds = 0.0
