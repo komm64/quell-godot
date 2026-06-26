@@ -121,11 +121,18 @@ def _import_video(video: Path, output_root: Path, fps: float, max_width: int, qu
 def _videos(core_tmp: Path, explicit_video: str) -> list[Path]:
     if explicit_video:
         return [Path(explicit_video).resolve()]
-    return sorted(
+    candidates = sorted(
         path
         for path in core_tmp.iterdir()
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
     )
+    by_slug: dict[str, Path] = {}
+    for path in candidates:
+        slug = _slug(path.stem)
+        current = by_slug.get(slug)
+        if current is None or path.stat().st_size > current.stat().st_size:
+            by_slug[slug] = path
+    return [by_slug[key] for key in sorted(by_slug.keys())]
 
 
 def main() -> int:
@@ -134,8 +141,8 @@ def main() -> int:
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--video", default="")
     parser.add_argument("--fps", type=float, default=12.0)
-    parser.add_argument("--max-width", type=int, default=640)
-    parser.add_argument("--quality", type=int, default=5)
+    parser.add_argument("--max-width", type=int, default=960)
+    parser.add_argument("--quality", type=int, default=3)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 

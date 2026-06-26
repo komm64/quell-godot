@@ -110,6 +110,7 @@ var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
 var headroom_margin := 0.80
 var contribution_enabled: Dictionary = {}
+var debug_menu_hidden := false
 
 var analyzer
 var after_analyzer
@@ -181,6 +182,7 @@ func _ready() -> void:
 		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
+	debug_menu_hidden = _cmdline_has_flag("--quell-risk-graph-only") or _cmdline_has_flag("--quell-hide-debug-menu") or _cmdline_has_flag("--quell-no-debug-menu")
 	game_budget_enabled = _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode")
 	game_budget_skip_raw_risk = _cmdline_has_flag("--quell-game-budget-skip-raw-risk") or _cmdline_has_flag("--quell-game-budget-control-only")
 	var game_budget_policy_arg := _cmdline_arg_value("--quell-game-budget-policy=", "")
@@ -272,7 +274,7 @@ func _input(event: InputEvent) -> void:
 		_on_clear_history_pressed()
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F1:
-		if debug_panel != null:
+		if debug_panel != null and not debug_menu_hidden:
 			debug_panel.visible = not debug_panel.visible
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F2:
@@ -889,7 +891,7 @@ func _process(delta: float) -> void:
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
 	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 	_profile_sample()
-	if _process_frame_count == 130 and OS.get_environment("QUELL_SHOT") != "":
+	if _process_frame_count >= 130 and OS.get_environment("QUELL_SHOT") != "":
 		var shot_img := get_viewport().get_texture().get_image()
 		if shot_img != null:
 			shot_img.save_png(OS.get_environment("QUELL_SHOT"))
@@ -951,6 +953,7 @@ func _build_hud() -> void:
 	var panel := PanelContainer.new()
 	panel.position = Vector2(16.0, 16.0)
 	panel.custom_minimum_size = Vector2(430.0, 0.0)
+	panel.visible = not debug_menu_hidden
 	debug_panel = panel
 	hud_layer.add_child(panel)
 
