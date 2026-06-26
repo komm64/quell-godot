@@ -274,7 +274,7 @@ func _input(event: InputEvent) -> void:
 		_on_clear_history_pressed()
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F1:
-		if debug_panel != null and not debug_menu_hidden:
+		if debug_panel != null:
 			debug_panel.visible = not debug_panel.visible
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F2:
