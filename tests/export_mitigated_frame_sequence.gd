@@ -117,10 +117,6 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	analyzer.spatial_sensitivity = RuntimeAnalyzerClass.SpatialSensitivity.BALANCED
 	if _object_has_property(analyzer, "game_budget_policy"):
 		analyzer.game_budget_policy = _game_budget_policy
-	if _object_has_property(raw_gpu, "risk_calculation_enabled"):
-		raw_gpu.risk_calculation_enabled = not (_game_budget_enabled and _game_budget_skip_raw_risk)
-	if _object_has_property(solver_after_gpu, "risk_calculation_enabled"):
-		solver_after_gpu.risk_calculation_enabled = true
 	_configure_after_measurement_analyzer(solver_after_analyzer)
 
 	if not pipeline.configure(_display_size, _analysis_size):
@@ -272,7 +268,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			last_shader_parameters = held_shader_parameters.duplicate(true)
 			continue
 
-		var raw_gpu_metrics: Dictionary = raw_gpu.analyze_texture(pipeline.analysis_source_texture, time_seconds)
+		var raw_gpu_metrics: Dictionary = _analyze_raw_texture(raw_gpu, pipeline.analysis_source_texture, time_seconds)
 		raw_gpu_metrics["source_kind"] = "frame_sequence"
 		if _raw_spatial_override_enabled:
 			analyzer.apply_spatial_image_override(raw_gpu_metrics, source_image)
@@ -712,6 +708,11 @@ func _shader_parameters_for_metrics(analyzer, metrics: Dictionary) -> Dictionary
 	if _game_budget_enabled and analyzer != null and analyzer.has_method("game_budget_shader_parameters"):
 		return analyzer.game_budget_shader_parameters(metrics)
 	return analyzer.shader_parameters(metrics)
+
+func _analyze_raw_texture(raw_gpu, texture: Texture2D, time_seconds: float) -> Dictionary:
+	if _game_budget_enabled and _game_budget_skip_raw_risk and raw_gpu.has_method("analyze_current_signals"):
+		return raw_gpu.analyze_current_signals(texture, time_seconds)
+	return raw_gpu.analyze_texture(texture, time_seconds)
 
 func _prepare_analysis_image(image: Image, target_size: Vector2i) -> Image:
 	if image.get_width() == target_size.x and image.get_height() == target_size.y:

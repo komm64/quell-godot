@@ -808,7 +808,7 @@ func _process(delta: float) -> void:
 		_raw_sample_count += 1
 		_last_raw_sample_frame = _process_frame_count
 		var analyze_start := Time.get_ticks_usec()
-		var raw_gpu_metrics: Dictionary = gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, elapsed_seconds)
+		var raw_gpu_metrics: Dictionary = _analyze_raw_source_texture(elapsed_seconds)
 		_profile_add("analyze_us", Time.get_ticks_usec() - analyze_start)
 		if not uploaded_sequence_frame:
 			raw_gpu_metrics["source_kind"] = "generated"
@@ -1262,6 +1262,16 @@ func _shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
 		return analyzer.game_budget_shader_parameters(metrics)
 	return analyzer.shader_parameters(metrics)
 
+func _analyze_raw_source_texture(time_seconds: float) -> Dictionary:
+	if (
+		game_budget_enabled
+		and game_budget_skip_raw_risk
+		and gpu_analyzer != null
+		and gpu_analyzer.has_method("analyze_current_signals")
+	):
+		return gpu_analyzer.analyze_current_signals(gpu_frame_pipeline.analysis_source_texture, time_seconds)
+	return gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, time_seconds)
+
 func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics["raw_risk"])
 	var measured_output_risk: float = float(after_metrics["raw_risk"])
@@ -1376,10 +1386,6 @@ func _sync_analyzer_settings() -> void:
 	_apply_contribution_settings(after_analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
-	if _object_has_property(gpu_analyzer, "risk_calculation_enabled"):
-		gpu_analyzer.risk_calculation_enabled = not (game_budget_enabled and game_budget_skip_raw_risk)
-	if _object_has_property(gpu_after_analyzer, "risk_calculation_enabled"):
-		gpu_after_analyzer.risk_calculation_enabled = true
 	current_frame_solver.enabled = current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "game_budget_enabled"):
 		current_frame_solver.game_budget_enabled = game_budget_enabled
