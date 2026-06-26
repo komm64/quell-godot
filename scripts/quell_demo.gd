@@ -100,6 +100,7 @@ var local_correction_enabled := true
 var preserve_source_hue := true
 var current_frame_solver_enabled := true
 var game_budget_enabled := false
+var game_budget_skip_raw_risk := false
 var game_budget_policy := 0
 var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
@@ -123,6 +124,7 @@ var local_correction_toggle: CheckButton
 var hue_preserve_toggle: CheckButton
 var current_frame_solver_toggle: CheckButton
 var game_budget_toggle: CheckButton
+var game_budget_skip_raw_risk_toggle: CheckButton
 var game_budget_policy_select: OptionButton
 var distance_value_label: Label
 var headroom_value_label: Label
@@ -172,8 +174,9 @@ func _ready() -> void:
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
 	game_budget_enabled = _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode")
+	game_budget_skip_raw_risk = _cmdline_has_flag("--quell-game-budget-skip-raw-risk") or _cmdline_has_flag("--quell-game-budget-control-only")
 	var game_budget_policy_arg := _cmdline_arg_value("--quell-game-budget-policy=", "")
-	if _cmdline_has_flag("--quell-game-budget-atf") or not game_budget_policy_arg.is_empty():
+	if _cmdline_has_flag("--quell-game-budget-atf") or not game_budget_policy_arg.is_empty() or game_budget_skip_raw_risk:
 		game_budget_enabled = true
 	current_frame_solver_enabled = not (_cmdline_has_flag("--quell-no-solver") or _cmdline_has_flag("--quell-no-current-frame-solver"))
 	if _cmdline_has_flag("--quell-solver") or _cmdline_has_flag("--quell-current-frame-solver"):
@@ -297,6 +300,7 @@ func _start_k64_io() -> void:
 			{"name": "preserve_source_hue", "type": "bool", "doc": "Raw hue reconstruction toggle"},
 			{"name": "current_frame_solver_enabled", "type": "bool", "doc": "CurrentFrame preview solver toggle"},
 			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency game budget mode toggle"},
+			{"name": "game_budget_skip_raw_risk", "type": "bool", "doc": "skip Raw-side risk aggregation in game-budget mode"},
 			{"name": "game_budget_policy_label", "type": "string", "doc": "game-budget filter policy"},
 			{"name": "spatial_sensitivity", "type": "int", "doc": "QuellAnalyzer.SpatialSensitivity enum value"},
 			{"name": "render_backend", "type": "string", "doc": "active Quell output backend"},
@@ -341,6 +345,9 @@ func _start_k64_io() -> void:
 		"args": [{"name": "enabled", "type": "bool"}],
 	})
 	io.call("register_action", "quell_set_game_budget", Callable(self, "_act_k64_set_game_budget"), {
+		"args": [{"name": "enabled", "type": "bool"}],
+	})
+	io.call("register_action", "quell_set_game_budget_skip_raw_risk", Callable(self, "_act_k64_set_game_budget_skip_raw_risk"), {
 		"args": [{"name": "enabled", "type": "bool"}],
 	})
 	io.call("register_action", "quell_set_game_budget_policy", Callable(self, "_act_k64_set_game_budget_policy"), {
@@ -467,6 +474,7 @@ func _provide_k64_status() -> Dictionary:
 		"preserve_source_hue": preserve_source_hue,
 		"current_frame_solver_enabled": current_frame_solver_enabled,
 		"game_budget_enabled": game_budget_enabled,
+		"game_budget_skip_raw_risk": game_budget_skip_raw_risk,
 		"game_budget_policy": int(game_budget_policy),
 		"game_budget_policy_label": _game_budget_policy_label(),
 		"spatial_sensitivity": int(spatial_sensitivity),
@@ -618,6 +626,19 @@ func _act_k64_set_game_budget(args: Dictionary) -> Dictionary:
 		game_budget_toggle.set_pressed_no_signal(game_budget_enabled)
 	if game_budget_enabled and _is_frame_sequence_source(_current_source_config()):
 		_preload_frame_sequence(_current_source_config())
+	_sync_analyzer_settings()
+	_ensure_gpu_frame_pipeline_size(_current_source_config())
+	_reset_analysis_state()
+	return _provide_k64_status()
+
+func _act_k64_set_game_budget_skip_raw_risk(args: Dictionary) -> Dictionary:
+	game_budget_skip_raw_risk = bool(args.get("enabled", args.get("value", game_budget_skip_raw_risk)))
+	if game_budget_skip_raw_risk:
+		game_budget_enabled = true
+	if game_budget_toggle != null:
+		game_budget_toggle.set_pressed_no_signal(game_budget_enabled)
+	if game_budget_skip_raw_risk_toggle != null:
+		game_budget_skip_raw_risk_toggle.set_pressed_no_signal(game_budget_skip_raw_risk)
 	_sync_analyzer_settings()
 	_ensure_gpu_frame_pipeline_size(_current_source_config())
 	_reset_analysis_state()
@@ -1011,6 +1032,12 @@ func _build_hud() -> void:
 	game_budget_toggle.toggled.connect(_on_game_budget_toggled)
 	stack.add_child(game_budget_toggle)
 
+	game_budget_skip_raw_risk_toggle = CheckButton.new()
+	game_budget_skip_raw_risk_toggle.text = "Skip Raw risk"
+	game_budget_skip_raw_risk_toggle.button_pressed = game_budget_skip_raw_risk
+	game_budget_skip_raw_risk_toggle.toggled.connect(_on_game_budget_skip_raw_risk_toggled)
+	stack.add_child(game_budget_skip_raw_risk_toggle)
+
 	game_budget_policy_select = OptionButton.new()
 	game_budget_policy_select.add_item("Direct brightness", QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS)
 	game_budget_policy_select.add_item("Adaptive temporal filter", QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER)
@@ -1284,7 +1311,7 @@ func _update_hud(metrics: Dictionary) -> void:
 		"on" if local_correction_enabled else "off",
 		"raw" if preserve_source_hue else "off",
 		"on" if current_frame_solver_enabled else "off",
-		_game_budget_policy_label() if game_budget_enabled else "off",
+		_game_budget_runtime_label(),
 		_mitigation_mode_label(),
 		_spatial_sensitivity_label(),
 		String(metrics.get("metric_backend", "generated")),
@@ -1349,6 +1376,10 @@ func _sync_analyzer_settings() -> void:
 	_apply_contribution_settings(after_analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
+	if _object_has_property(gpu_analyzer, "risk_calculation_enabled"):
+		gpu_analyzer.risk_calculation_enabled = not (game_budget_enabled and game_budget_skip_raw_risk)
+	if _object_has_property(gpu_after_analyzer, "risk_calculation_enabled"):
+		gpu_after_analyzer.risk_calculation_enabled = true
 	current_frame_solver.enabled = current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "game_budget_enabled"):
 		current_frame_solver.game_budget_enabled = game_budget_enabled
@@ -1782,6 +1813,16 @@ func _on_game_budget_toggled(enabled: bool) -> void:
 	_ensure_gpu_frame_pipeline_size(_current_source_config())
 	_reset_analysis_state()
 
+func _on_game_budget_skip_raw_risk_toggled(enabled: bool) -> void:
+	game_budget_skip_raw_risk = enabled
+	if game_budget_skip_raw_risk:
+		game_budget_enabled = true
+		if game_budget_toggle != null:
+			game_budget_toggle.set_pressed_no_signal(true)
+	_sync_analyzer_settings()
+	_ensure_gpu_frame_pipeline_size(_current_source_config())
+	_reset_analysis_state()
+
 func _on_game_budget_policy_selected(index: int) -> void:
 	game_budget_policy = game_budget_policy_select.get_item_id(index)
 	_sync_analyzer_settings()
@@ -1799,6 +1840,14 @@ func _game_budget_policy_label() -> String:
 	if game_budget_policy == QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER:
 		return "atf"
 	return "direct"
+
+func _game_budget_runtime_label() -> String:
+	if not game_budget_enabled:
+		return "off"
+	var label := _game_budget_policy_label()
+	if game_budget_skip_raw_risk:
+		label += "/raw-off"
+	return label
 
 func _on_restart_video_pressed() -> void:
 	elapsed_seconds = 0.0

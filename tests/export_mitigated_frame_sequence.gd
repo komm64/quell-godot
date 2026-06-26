@@ -31,6 +31,7 @@ var _temporal_blend_alpha: float = 0.50
 var _current_frame_solver_enabled := false
 var _analytic_solver_enabled := false
 var _game_budget_enabled := false
+var _game_budget_skip_raw_risk := false
 var _game_budget_policy: int = RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
 var _raw_spatial_override_enabled := true
 var _after_spatial_override_enabled := true
@@ -116,6 +117,10 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	analyzer.spatial_sensitivity = RuntimeAnalyzerClass.SpatialSensitivity.BALANCED
 	if _object_has_property(analyzer, "game_budget_policy"):
 		analyzer.game_budget_policy = _game_budget_policy
+	if _object_has_property(raw_gpu, "risk_calculation_enabled"):
+		raw_gpu.risk_calculation_enabled = not (_game_budget_enabled and _game_budget_skip_raw_risk)
+	if _object_has_property(solver_after_gpu, "risk_calculation_enabled"):
+		solver_after_gpu.risk_calculation_enabled = true
 	_configure_after_measurement_analyzer(solver_after_analyzer)
 
 	if not pipeline.configure(_display_size, _analysis_size):
@@ -351,6 +356,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		"local_correction_enabled": analyzer.local_correction_enabled,
 		"current_frame_solver_enabled": _current_frame_solver_enabled,
 		"game_budget_enabled": _game_budget_enabled,
+		"game_budget_skip_raw_risk": _game_budget_skip_raw_risk,
 		"game_budget_policy": _game_budget_policy,
 		"game_budget_policy_label": _game_budget_policy_label(),
 		"spatial_sensitivity": int(analyzer.spatial_sensitivity),
@@ -435,6 +441,10 @@ func _parse_args() -> void:
 			_game_budget_enabled = true
 			_current_frame_solver_enabled = true
 			_game_budget_policy = RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+		elif arg == "--game-budget-skip-raw-risk" or arg == "--quell-game-budget-skip-raw-risk" or arg == "--game-budget-control-only" or arg == "--quell-game-budget-control-only":
+			_game_budget_enabled = true
+			_game_budget_skip_raw_risk = true
+			_current_frame_solver_enabled = true
 		elif arg.begins_with("--game-budget-policy=") or arg.begins_with("--quell-game-budget-policy="):
 			_game_budget_enabled = true
 			_current_frame_solver_enabled = true
