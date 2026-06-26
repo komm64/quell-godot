@@ -153,6 +153,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	var last_runtime_metrics: Dictionary = {}
 	var last_shader_parameters: Dictionary = {}
 	var last_measured_after: Dictionary = {}
+	var last_source_index := -1
 	var last_raw_sample_frame: int = -999999
 	var last_after_sample_frame: int = -999999
 
@@ -222,7 +223,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			push_error("Failed to upload source frame %d" % source_index)
 			_failed = true
 			continue
-		if _game_budget_enabled and not last_runtime_metrics.is_empty() and not last_shader_parameters.is_empty() and out_index - last_raw_sample_frame < GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES:
+		var source_changed := source_index != last_source_index
+		if _game_budget_enabled and not source_changed and not last_runtime_metrics.is_empty() and not last_shader_parameters.is_empty() and out_index - last_raw_sample_frame < GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES:
 			var held_runtime_metrics := last_runtime_metrics.duplicate(true)
 			held_runtime_metrics["time"] = time_seconds
 			held_runtime_metrics["metric_backend"] = "gpu-game-budget-raw-held"
@@ -329,6 +331,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		control_csv.store_line(_control_csv_row(out_index + 1, time_seconds, source_index + 1, runtime_metrics, measured_after, analyzer.mitigation_strength, shader_parameters))
 		last_runtime_metrics = runtime_metrics.duplicate(true)
 		last_shader_parameters = shader_parameters.duplicate(true)
+		last_source_index = source_index
 
 	raw_csv.close()
 	control_csv.close()

@@ -752,7 +752,7 @@ func _process(delta: float) -> void:
 			var generate_start := Time.get_ticks_usec()
 			gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
 			_profile_add("texture_us", Time.get_ticks_usec() - generate_start)
-		if not _should_sample_raw():
+		if not uploaded_sequence_frame and not _should_sample_raw():
 			var reuse_start := Time.get_ticks_usec()
 			metrics = _last_runtime_metrics.duplicate(false)
 			metrics["time"] = elapsed_seconds
