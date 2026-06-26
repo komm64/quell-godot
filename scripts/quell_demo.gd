@@ -4,6 +4,9 @@ const CORE_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_analyzer.gd"
 const CORE_GPU_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_gpu_analyzer.gd"
 const CORE_GPU_FRAME_PIPELINE_PATH := "res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd"
 const CORE_CURRENT_FRAME_SOLVER_PATH := "res://addons/quell_core/runtime/quell_current_frame_solver.gd"
+const CORE_TMP_DIR := "C:/Users/komm64/Projects/quell-core/.tmp"
+const CORE_TMP_FRAME_SEQUENCE_DIR := "C:/Users/komm64/Projects/quell-core/.tmp/quell-godot-sample-frames"
+const TMP_VIDEO_FRAME_MANIFEST := "manifest.json"
 const RiskGraphClass = preload("res://scripts/quell_risk_graph.gd")
 
 var QuellAnalyzerClass
@@ -88,6 +91,7 @@ const ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK: bool = false
 const HUD_UPDATE_HZ: float = 10.0
 const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
 const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 6
+const FRAME_SEQUENCE_PRELOAD_LIMIT: int = 96
 var elapsed_seconds := 0.0
 var current_mode := 0
 var mitigation_enabled := true
@@ -126,6 +130,8 @@ var current_frame_solver_toggle: CheckButton
 var game_budget_toggle: CheckButton
 var game_budget_skip_raw_risk_toggle: CheckButton
 var game_budget_policy_select: OptionButton
+var frame_sequence_seek_slider: HSlider
+var frame_sequence_seek_label: Label
 var distance_value_label: Label
 var headroom_value_label: Label
 var temporal_blend_value_label: Label
@@ -154,6 +160,8 @@ var _frame_sequence_index := 0
 var _frame_sequence_accumulator := 0.0
 var _frame_sequence_frame_changed := false
 var _frame_sequence_pending_analysis_delta := 0.0
+var _frame_sequence_seek_dragging := false
+var _frame_sequence_force_frame_changed := false
 var _last_frame_sequence_metrics: Dictionary = {}
 var _last_runtime_metrics: Dictionary = {}
 var _last_after_metrics: Dictionary = {}
@@ -197,6 +205,7 @@ func _ready() -> void:
 	contribution_enabled = _default_contribution_enabled()
 	_mode_configs = MODE_CONFIGS.duplicate(true)
 	_register_private_frame_sequences()
+	_register_core_tmp_frame_sequences()
 	_load_comparator_baselines()
 	_sync_analyzer_settings()
 	_build_visual_layers()
@@ -1046,6 +1055,7 @@ func _build_hud() -> void:
 	stack.add_child(_with_caption("Budget filter", game_budget_policy_select))
 
 	stack.add_child(_reset_controls())
+	stack.add_child(_frame_sequence_seek_controls())
 	stack.add_child(_contribution_controls())
 
 	var distance_slider := HSlider.new()
@@ -1191,6 +1201,37 @@ func _reset_controls() -> Control:
 
 	return row
 
+func _frame_sequence_seek_controls() -> Control:
+	var wrapper := VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
+	wrapper.visible = false
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 8)
+	var label := Label.new()
+	label.text = "Video"
+	label.add_theme_color_override("font_color", Color(0.70, 0.78, 0.82))
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(label)
+
+	frame_sequence_seek_label = Label.new()
+	frame_sequence_seek_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	frame_sequence_seek_label.custom_minimum_size = Vector2(145.0, 0.0)
+	frame_sequence_seek_label.add_theme_color_override("font_color", Color(0.90, 0.95, 0.97))
+	header.add_child(frame_sequence_seek_label)
+	wrapper.add_child(header)
+
+	frame_sequence_seek_slider = HSlider.new()
+	frame_sequence_seek_slider.min_value = 0.0
+	frame_sequence_seek_slider.max_value = 1.0
+	frame_sequence_seek_slider.step = 1.0
+	frame_sequence_seek_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	frame_sequence_seek_slider.drag_started.connect(_on_frame_sequence_seek_drag_started)
+	frame_sequence_seek_slider.drag_ended.connect(_on_frame_sequence_seek_drag_ended)
+	frame_sequence_seek_slider.value_changed.connect(_on_frame_sequence_seek_value_changed)
+	wrapper.add_child(frame_sequence_seek_slider)
+	return wrapper
+
 func _add_metric_row(parent: VBoxContainer, key: String, caption: String) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
@@ -1299,6 +1340,7 @@ func _update_hud(metrics: Dictionary) -> void:
 		return
 	_next_hud_update_time = elapsed_seconds + (1.0 / HUD_UPDATE_HZ)
 	risk_graph.add_sample(elapsed_seconds, metrics)
+	_refresh_frame_sequence_seek_ui()
 
 	for key in metric_bars.keys():
 		if not metrics.has(key):
@@ -1352,6 +1394,7 @@ func _apply_mode(index: int) -> void:
 	if game_budget_enabled and _is_frame_sequence_source(config):
 		_preload_frame_sequence(config)
 	_reset_analysis_state()
+	_refresh_frame_sequence_seek_ui()
 
 func _demo_risk_envelope(cycle_hz: float) -> float:
 	var phase: float = sin(elapsed_seconds * TAU * cycle_hz) * 0.5 + 0.5
@@ -1405,10 +1448,9 @@ func _apply_contribution_settings(target_analyzer) -> void:
 		target_analyzer.set_contribution_enabled(String(key), bool(contribution_enabled[key]))
 
 func _reset_analysis_state(reset_graph: bool = true) -> void:
-	_reset_history_state(reset_graph)
-	_reset_frame_sequence_playback()
+	_reset_history_state(reset_graph, true)
 
-func _reset_history_state(reset_graph: bool = true) -> void:
+func _reset_history_state(reset_graph: bool = true, reset_playback: bool = true) -> void:
 	analyzer.reset()
 	after_analyzer.reset()
 	gpu_analyzer.reset()
@@ -1416,7 +1458,8 @@ func _reset_history_state(reset_graph: bool = true) -> void:
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.reset_output_history()
 	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(_current_source_config()))
-	_reset_frame_sequence_playback()
+	if reset_playback:
+		_reset_frame_sequence_playback()
 	_process_frame_count = 0
 	_raw_sample_count = 0
 	_after_sample_count = 0
@@ -1432,21 +1475,61 @@ func _reset_history_state(reset_graph: bool = true) -> void:
 
 func _register_private_frame_sequences() -> void:
 	for source in PRIVATE_FRAME_SEQUENCE_SOURCES:
-		var frame_paths := _find_frame_sequence_files(source)
-		if frame_paths.is_empty():
-			continue
-		var config := source.duplicate(true)
-		var source_id := String(config.get("id", "frame_sequence_%d" % _mode_configs.size()))
-		config["id"] = source_id
-		config["frame_count"] = frame_paths.size()
-		_frame_sequence_paths[source_id] = frame_paths
-		_mode_configs.append(config)
+		_register_frame_sequence_source(source)
+
+func _register_core_tmp_frame_sequences() -> void:
+	var root_dir := _globalize_demo_path(CORE_TMP_FRAME_SEQUENCE_DIR)
+	var dir := DirAccess.open(root_dir)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var entry_name := dir.get_next()
+	while entry_name != "":
+		if dir.current_is_dir() and not entry_name.begins_with("."):
+			var sequence_dir := root_dir.path_join(entry_name)
+			var manifest_path := sequence_dir.path_join(TMP_VIDEO_FRAME_MANIFEST)
+			var manifest := _load_json_dictionary(manifest_path)
+			if not manifest.is_empty():
+				var source := {
+					"id": String(manifest.get("id", "tmp_video_%s" % entry_name)),
+					"name": String(manifest.get("name", entry_name)),
+					"source_type": "frame_sequence",
+					"frame_dir": String(manifest.get("frame_dir", sequence_dir)),
+					"frame_prefix": String(manifest.get("frame_prefix", "frame_")),
+					"frame_extension": String(manifest.get("frame_extension", ".jpg")),
+					"fps": float(manifest.get("fps", 12.0)),
+					"estimated_risk": float(manifest.get("estimated_risk", 1.35)),
+					"validation_case_id": "",
+				}
+				_register_frame_sequence_source(source)
+		entry_name = dir.get_next()
+	dir.list_dir_end()
+
+func _register_frame_sequence_source(source: Dictionary) -> void:
+	var frame_paths := _find_frame_sequence_files(source)
+	if frame_paths.is_empty():
+		return
+	var config := source.duplicate(true)
+	var source_id := String(config.get("id", "frame_sequence_%d" % _mode_configs.size()))
+	config["id"] = source_id
+	config["frame_count"] = frame_paths.size()
+	_frame_sequence_paths[source_id] = frame_paths
+	_mode_configs.append(config)
+
+func _load_json_dictionary(path: String) -> Dictionary:
+	if not FileAccess.file_exists(path):
+		return {}
+	var text := FileAccess.get_file_as_string(path)
+	if text.is_empty():
+		return {}
+	var parsed = JSON.parse_string(text)
+	return parsed if parsed is Dictionary else {}
 
 func _find_frame_sequence_files(config: Dictionary) -> Array[String]:
 	var frame_dir := String(config.get("frame_dir", ""))
 	if frame_dir.is_empty():
 		return []
-	var global_dir := ProjectSettings.globalize_path(frame_dir)
+	var global_dir := _globalize_demo_path(frame_dir)
 	var dir := DirAccess.open(global_dir)
 	if dir == null:
 		return []
@@ -1464,6 +1547,13 @@ func _find_frame_sequence_files(config: Dictionary) -> Array[String]:
 	frame_paths.sort()
 	return frame_paths
 
+func _globalize_demo_path(path: String) -> String:
+	if path.is_empty():
+		return path
+	if path.is_absolute_path() or path.begins_with("\\\\"):
+		return path.replace("\\", "/")
+	return ProjectSettings.globalize_path(path).replace("\\", "/")
+
 func _current_source_config() -> Dictionary:
 	if _mode_configs.is_empty():
 		return MODE_CONFIGS[0]
@@ -1473,7 +1563,9 @@ func _is_frame_sequence_source(config: Dictionary) -> bool:
 	return String(config.get("source_type", "generated")) == "frame_sequence"
 
 func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
-	_frame_sequence_frame_changed = false
+	var force_changed := _frame_sequence_force_frame_changed
+	_frame_sequence_force_frame_changed = false
+	_frame_sequence_frame_changed = force_changed
 	var source_id := String(config.get("id", ""))
 	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
 	if frame_paths.is_empty():
@@ -1485,13 +1577,14 @@ func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
 		_frame_sequence_accumulator = 0.0
 		_frame_sequence_frame_changed = true
 	else:
-		_frame_sequence_accumulator += max(delta, 0.0)
-		var frame_duration := 1.0 / fps
-		if _frame_sequence_accumulator >= frame_duration:
-			var advance_count := int(floor(_frame_sequence_accumulator / frame_duration))
-			_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
-			_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
-			_frame_sequence_frame_changed = advance_count > 0
+		if not force_changed:
+			_frame_sequence_accumulator += max(delta, 0.0)
+			var frame_duration := 1.0 / fps
+			if _frame_sequence_accumulator >= frame_duration:
+				var advance_count := int(floor(_frame_sequence_accumulator / frame_duration))
+				_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
+				_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
+				_frame_sequence_frame_changed = advance_count > 0
 	if game_budget_enabled and not _frame_sequence_frame_changed:
 		return null
 	var frame_path := String(frame_paths[_frame_sequence_index])
@@ -1508,6 +1601,71 @@ func _load_frame_sequence_image(config: Dictionary, time_seconds: float, fps_lim
 	var frame_index: int = int(floor(time_seconds * fps)) % frame_paths.size()
 	var frame_path := String(frame_paths[frame_index])
 	return _load_frame_sequence_path(frame_path)
+
+func _seek_frame_sequence_to_frame(frame_index: int) -> void:
+	var source := _current_source_config()
+	if not _is_frame_sequence_source(source):
+		return
+	var source_id := String(source.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	if frame_paths.is_empty():
+		return
+	var clamped_index := clampi(frame_index, 0, frame_paths.size() - 1)
+	var fps: float = max(1.0, float(source.get("fps", 24.0)))
+	_frame_sequence_active_id = source_id
+	_frame_sequence_index = clamped_index
+	_frame_sequence_accumulator = 0.0
+	_frame_sequence_frame_changed = true
+	_frame_sequence_force_frame_changed = true
+	_frame_sequence_pending_analysis_delta = 0.0
+	_last_frame_sequence_metrics.clear()
+	elapsed_seconds = float(clamped_index) / fps
+	_reset_history_state(true, false)
+	_refresh_frame_sequence_seek_ui()
+
+func _refresh_frame_sequence_seek_ui() -> void:
+	if frame_sequence_seek_slider == null:
+		return
+	var wrapper := frame_sequence_seek_slider.get_parent()
+	var source := _current_source_config()
+	var visible := _is_frame_sequence_source(source)
+	if wrapper != null:
+		wrapper.visible = visible
+	if not visible:
+		return
+	var source_id := String(source.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	var frame_count := frame_paths.size()
+	frame_sequence_seek_slider.editable = frame_count > 1
+	frame_sequence_seek_slider.max_value = float(maxi(frame_count - 1, 0))
+	frame_sequence_seek_slider.page = maxf(1.0, floor(float(frame_count) / 20.0))
+	if not _frame_sequence_seek_dragging:
+		frame_sequence_seek_slider.set_value_no_signal(float(clampi(_frame_sequence_index, 0, maxi(frame_count - 1, 0))))
+		_set_frame_sequence_seek_label(_frame_sequence_index)
+
+func _set_frame_sequence_seek_label(frame_index: int) -> void:
+	if frame_sequence_seek_label == null:
+		return
+	var source := _current_source_config()
+	var source_id := String(source.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	var frame_count := frame_paths.size()
+	var fps: float = max(1.0, float(source.get("fps", 24.0)))
+	var clamped_index := clampi(frame_index, 0, maxi(frame_count - 1, 0))
+	var current_seconds := float(clamped_index) / fps
+	var total_seconds := float(maxi(frame_count - 1, 0)) / fps
+	frame_sequence_seek_label.text = "%s / %s  %d/%d" % [
+		_format_time_seconds(current_seconds),
+		_format_time_seconds(total_seconds),
+		clamped_index + 1 if frame_count > 0 else 0,
+		frame_count,
+	]
+
+func _format_time_seconds(seconds: float) -> String:
+	var whole := maxi(0, int(floor(seconds)))
+	var minutes := int(floor(float(whole) / 60.0))
+	var secs := whole % 60
+	return "%d:%02d" % [minutes, secs]
 
 func _load_frame_sequence_path(frame_path: String):
 	if _frame_cache.has(frame_path):
@@ -1526,11 +1684,16 @@ func _load_frame_sequence_path(frame_path: String):
 		_frame_cache.erase(evicted_path)
 	return image
 
-func _preload_frame_sequence(config: Dictionary) -> void:
+func _preload_frame_sequence(config: Dictionary, start_index: int = 0, limit: int = FRAME_SEQUENCE_PRELOAD_LIMIT) -> void:
 	var source_id := String(config.get("id", ""))
 	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
-	for frame_path in frame_paths:
-		_load_frame_sequence_path(String(frame_path))
+	if frame_paths.is_empty() or limit <= 0:
+		return
+	var clamped_start := clampi(start_index, 0, frame_paths.size() - 1)
+	var count := mini(limit, frame_paths.size())
+	for offset in range(count):
+		var index := (clamped_start + offset) % frame_paths.size()
+		_load_frame_sequence_path(String(frame_paths[index]))
 
 func _reset_frame_sequence_playback() -> void:
 	_frame_sequence_active_id = ""
@@ -1538,6 +1701,7 @@ func _reset_frame_sequence_playback() -> void:
 	_frame_sequence_accumulator = 0.0
 	_frame_sequence_frame_changed = false
 	_frame_sequence_pending_analysis_delta = 0.0
+	_frame_sequence_force_frame_changed = false
 	_last_frame_sequence_metrics.clear()
 
 func _should_measure_after(metrics: Dictionary) -> bool:
@@ -1855,13 +2019,26 @@ func _game_budget_runtime_label() -> String:
 		label += "/raw-off"
 	return label
 
+func _on_frame_sequence_seek_drag_started() -> void:
+	_frame_sequence_seek_dragging = true
+
+func _on_frame_sequence_seek_drag_ended(_value_changed: bool) -> void:
+	_frame_sequence_seek_dragging = false
+	if frame_sequence_seek_slider == null:
+		return
+	_seek_frame_sequence_to_frame(roundi(float(frame_sequence_seek_slider.value)))
+
+func _on_frame_sequence_seek_value_changed(value: float) -> void:
+	if _frame_sequence_seek_dragging:
+		_set_frame_sequence_seek_label(roundi(value))
+
 func _on_restart_video_pressed() -> void:
 	elapsed_seconds = 0.0
 	_reset_frame_sequence_playback()
 	_reset_history_state()
 
 func _on_clear_history_pressed() -> void:
-	_reset_history_state()
+	_reset_history_state(true, false)
 
 func _on_contribution_toggled(enabled: bool, component: String) -> void:
 	contribution_enabled[component] = enabled
