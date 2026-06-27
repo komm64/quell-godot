@@ -93,6 +93,7 @@ const HUD_UPDATE_HZ: float = 10.0
 const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
 const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 6
 const FRAME_SEQUENCE_PRELOAD_LIMIT: int = 96
+const GAME_BUDGET_DEFAULT_ENABLED: bool = true
 var elapsed_seconds := 0.0
 var current_mode := 0
 var mitigation_enabled := true
@@ -104,7 +105,7 @@ var max_feedback_amount := 0.60
 var local_correction_enabled := true
 var preserve_source_hue := true
 var current_frame_solver_enabled := true
-var game_budget_enabled := false
+var game_budget_enabled := GAME_BUDGET_DEFAULT_ENABLED
 var game_budget_skip_raw_risk := false
 var game_budget_policy := 0
 var spatial_sensitivity := 0
@@ -186,7 +187,11 @@ func _ready() -> void:
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
 	_legacy_risk_graph_enabled = _cmdline_has_flag("--quell-legacy-risk-graph")
 	debug_menu_hidden = _cmdline_has_flag("--quell-risk-graph-only") or _cmdline_has_flag("--quell-hide-debug-menu") or _cmdline_has_flag("--quell-no-debug-menu")
-	game_budget_enabled = _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode")
+	game_budget_enabled = GAME_BUDGET_DEFAULT_ENABLED
+	if _cmdline_has_flag("--quell-full-quality") or _cmdline_has_flag("--quell-no-game-budget"):
+		game_budget_enabled = false
+	if _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode"):
+		game_budget_enabled = true
 	game_budget_skip_raw_risk = _cmdline_has_flag("--quell-game-budget-skip-raw-risk") or _cmdline_has_flag("--quell-game-budget-control-only")
 	var game_budget_policy_arg := _cmdline_arg_value("--quell-game-budget-policy=", "")
 	if _cmdline_has_flag("--quell-game-budget-atf") or not game_budget_policy_arg.is_empty() or game_budget_skip_raw_risk:

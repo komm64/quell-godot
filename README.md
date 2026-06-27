@@ -41,6 +41,9 @@ private core installed, it runs the GPU `RenderingDevice` demo:
     previous output frame.
   - Temporal blend: mixes against the previous corrected frame to limit
     frame-to-frame luminance changes.
+- Developer Alpha demo launches in game-budget mode by default. Use
+  `--quell-full-quality` or `--quell-no-game-budget` to run the heavier
+  validation-oriented path.
 - HUD graph for Raw, After, and mitigation strength
 - `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
   actual scene color buffer and applies mitigation before display.
