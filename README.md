@@ -4,9 +4,8 @@ Godot binding and demo project for Quell.
 
 This repository contains the public Godot addon wrapper:
 
-- `addons/quell` registers the `QuellRuntime` custom node.
-- If the private core is installed, the plugin also registers
-  `QuellCompositorEffect` for 3D renderer compositor integration.
+- `addons/quell` contains public addon metadata.
+- `QuellRuntime` is provided by the synced native GDExtension.
 - `scripts/` and `scenes/` contain the demo UI and risk graph.
 - The analysis and mitigation implementation is provided separately during
   local development.
@@ -21,8 +20,8 @@ From this repository:
 .\tools\sync_private_core.ps1 ..\quell-core
 ```
 
-That command copies the local core addon into `addons/quell_core`. The directory
-is ignored by Git.
+That command copies the local core addons into `addons/quell_core` and
+`addons/quell_core_native`. Both directories are ignored by Git.
 
 ## Run Demo
 
@@ -49,20 +48,12 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 
 ## Addon Use
 
-Copy `addons/quell` into a Godot project and enable **Project > Project Settings
-> Plugins > Quell**. To run the analyzer and GPU mitigation path, install the
-matching local core addon as well.
-
-The public node-facing API is `QuellRuntime`. With private core installed,
-`QuellRuntime.create_compositor_effect()` returns a `CompositorEffect` resource
-that can be inserted into a Godot `Compositor` for real 3D scene rendering. With
-the private core installed, that effect reads the scene color buffer on the GPU,
-downsamples it to a configurable analysis surface, computes Raw FPA metrics,
-updates mitigation strength, applies correction to the full-resolution scene
-color buffer, and then measures the corrected frame through the same reduced
-analysis path. The detection, feedback controller, GPU
-metric reducer, and mitigation compute shaders are implementation details
-supplied by the core addon.
+Copy the developer-beta package contents into a Godot project and enable
+**Project > Project Settings > Plugins > Quell**. The public node-facing API is
+the native `QuellRuntime` class. The analyzer, feedback controller, solver, GPU
+metric reducer, mitigation compute shaders, and required developer-beta
+logo/URL/Risk overlay are implementation details supplied by the native core
+addon.
 
 ## License
 

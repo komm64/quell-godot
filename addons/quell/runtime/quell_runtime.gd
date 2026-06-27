@@ -1,7 +1,6 @@
-class_name QuellRuntime
 extends Node
 
-const CORE_RUNTIME_PATH := "res://addons/quell_core/runtime/quell_core_runtime.gd"
+const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
 signal metrics_updated(metrics: Dictionary)
 
@@ -25,62 +24,60 @@ signal metrics_updated(metrics: Dictionary)
 		correction_mode = clampi(value, 0, 2)
 		_sync_settings()
 
-var _core: Node
+var _native_runtime: Node
 var last_metrics: Dictionary = {}
 
 func _ready() -> void:
-	_ensure_core()
+	_ensure_native_runtime()
 	_sync_settings()
 
 func is_core_available() -> bool:
-	return _ensure_core()
+	return _ensure_native_runtime()
 
 func reset() -> void:
-	if not _ensure_core():
+	if not _ensure_native_runtime():
 		last_metrics.clear()
 		return
-	_core.reset()
+	_native_runtime.reset()
 	last_metrics.clear()
 
 func update_from_metrics(raw_metrics: Dictionary, after_metrics: Dictionary, delta: float, time_seconds: float) -> Dictionary:
-	if not _ensure_core():
+	if not _ensure_native_runtime():
 		last_metrics = _unavailable_metrics(time_seconds)
 		metrics_updated.emit(last_metrics)
 		return last_metrics
-	last_metrics = _core.update_from_metrics(raw_metrics, after_metrics, delta, time_seconds)
+	last_metrics = _native_runtime.update_from_metrics(raw_metrics, after_metrics, delta, time_seconds)
 	metrics_updated.emit(last_metrics)
 	return last_metrics
 
 func shader_parameters(metrics: Dictionary = {}) -> Dictionary:
-	if not _ensure_core():
+	if not _ensure_native_runtime():
 		return {}
-	return _core.shader_parameters(metrics)
+	return _native_runtime.shader_parameters(metrics)
 
-func _ensure_core() -> bool:
-	if _core != null:
+func _ensure_native_runtime() -> bool:
+	if _native_runtime != null:
 		return true
-	if not ResourceLoader.exists(CORE_RUNTIME_PATH):
+	NativeBridgeClass.try_load_default_extension()
+	if not ClassDB.class_exists("QuellRuntime"):
 		return false
-	var core_script = load(CORE_RUNTIME_PATH)
-	if core_script == null:
+	_native_runtime = ClassDB.instantiate("QuellRuntime")
+	if _native_runtime == null:
 		return false
-	_core = core_script.new()
-	add_child(_core)
-	if _core.has_signal("metrics_updated"):
-		_core.metrics_updated.connect(func(metrics: Dictionary) -> void:
-			last_metrics = metrics
-		)
+	add_child(_native_runtime)
+	_native_runtime.metrics_updated.connect(func(metrics: Dictionary) -> void:
+		last_metrics = metrics
+	)
 	_sync_settings()
 	return true
 
 func _sync_settings() -> void:
-	if _core == null:
+	if _native_runtime == null:
 		return
-	_core.mitigation_enabled = mitigation_enabled
-	_core.viewing_distance_m = viewing_distance_m
-	_core.headroom_margin = headroom_margin
-	if _core.has_method("set_correction_mode"):
-		_core.set_correction_mode(correction_mode)
+	_native_runtime.mitigation_enabled = mitigation_enabled
+	_native_runtime.viewing_distance_m = viewing_distance_m
+	_native_runtime.headroom_margin = headroom_margin
+	_native_runtime.correction_mode = correction_mode
 
 func _unavailable_metrics(time_seconds: float) -> Dictionary:
 	return {

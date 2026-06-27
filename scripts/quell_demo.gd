@@ -1,18 +1,19 @@
 extends Control
 
-const CORE_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_analyzer.gd"
-const CORE_GPU_ANALYZER_PATH := "res://addons/quell_core/runtime/quell_gpu_analyzer.gd"
-const CORE_GPU_FRAME_PIPELINE_PATH := "res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd"
-const CORE_CURRENT_FRAME_SOLVER_PATH := "res://addons/quell_core/runtime/quell_current_frame_solver.gd"
 const CORE_TMP_DIR := "C:/Users/komm64/Projects/quell-core/.tmp"
 const CORE_TMP_FRAME_SEQUENCE_DIR := "C:/Users/komm64/Projects/quell-core/.tmp/quell-godot-sample-frames"
 const TMP_VIDEO_FRAME_MANIFEST := "manifest.json"
 const RiskGraphClass = preload("res://scripts/quell_risk_graph.gd")
+const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
-var QuellAnalyzerClass
-var GpuAnalyzerClass
-var GpuFramePipelineClass
-var CurrentFrameSolverClass
+const MITIGATION_MODE_CURRENT_FRAME_ONLY := 0
+const MITIGATION_MODE_TEMPORAL_BLEND := 1
+const MITIGATION_MODE_ADAPTIVE := 2
+const SPATIAL_SENSITIVITY_STRICT := 0
+const SPATIAL_SENSITIVITY_BALANCED := 1
+const GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS := 0
+const GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER := 1
+
 var _core_available := false
 
 # Synthetic stress modes for runtime visualization only. These values are not
@@ -191,19 +192,22 @@ func _ready() -> void:
 	current_frame_solver_enabled = not (_cmdline_has_flag("--quell-no-solver") or _cmdline_has_flag("--quell-no-current-frame-solver"))
 	if _cmdline_has_flag("--quell-solver") or _cmdline_has_flag("--quell-current-frame-solver"):
 		current_frame_solver_enabled = true
-	analyzer = QuellAnalyzerClass.new()
-	after_analyzer = QuellAnalyzerClass.new()
-	gpu_analyzer = GpuAnalyzerClass.new()
-	gpu_after_analyzer = GpuAnalyzerClass.new()
-	current_frame_solver = CurrentFrameSolverClass.new()
-	gpu_frame_pipeline = GpuFramePipelineClass.new()
-	mitigation_mode = QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY
-	game_budget_policy = QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+	analyzer = NativeBridgeClass.instantiate_native_analyzer()
+	after_analyzer = NativeBridgeClass.instantiate_native_analyzer()
+	gpu_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
+	gpu_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
+	current_frame_solver = NativeBridgeClass.instantiate_native_current_frame_solver()
+	gpu_frame_pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
+	if analyzer == null or after_analyzer == null or gpu_analyzer == null or gpu_after_analyzer == null or current_frame_solver == null or gpu_frame_pipeline == null:
+		_build_notice("Quell native core could not be instantiated.\nBuild/load addons/quell_core_native before launching the demo.")
+		return
+	mitigation_mode = MITIGATION_MODE_CURRENT_FRAME_ONLY
+	game_budget_policy = GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
 	if not game_budget_policy_arg.is_empty():
 		game_budget_policy = _parse_game_budget_policy(game_budget_policy_arg)
 	if _cmdline_has_flag("--quell-game-budget-atf"):
-		game_budget_policy = QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
-	spatial_sensitivity = QuellAnalyzerClass.SpatialSensitivity.BALANCED
+		game_budget_policy = GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
+	spatial_sensitivity = SPATIAL_SENSITIVITY_BALANCED
 	contribution_enabled = _default_contribution_enabled()
 	_mode_configs = MODE_CONFIGS.duplicate(true)
 	_register_private_frame_sequences()
@@ -216,14 +220,13 @@ func _ready() -> void:
 	_start_k64_io()
 
 func _load_core_classes() -> bool:
-	for path in [CORE_ANALYZER_PATH, CORE_GPU_ANALYZER_PATH, CORE_GPU_FRAME_PIPELINE_PATH, CORE_CURRENT_FRAME_SOLVER_PATH]:
-		if not ResourceLoader.exists(path):
-			return false
-	QuellAnalyzerClass = load(CORE_ANALYZER_PATH)
-	GpuAnalyzerClass = load(CORE_GPU_ANALYZER_PATH)
-	GpuFramePipelineClass = load(CORE_GPU_FRAME_PIPELINE_PATH)
-	CurrentFrameSolverClass = load(CORE_CURRENT_FRAME_SOLVER_PATH)
-	_core_available = QuellAnalyzerClass != null and GpuAnalyzerClass != null and GpuFramePipelineClass != null and CurrentFrameSolverClass != null
+	NativeBridgeClass.try_load_default_extension()
+	_core_available = (
+		NativeBridgeClass.is_analyzer_available()
+		and NativeBridgeClass.is_gpu_analyzer_available()
+		and NativeBridgeClass.is_gpu_frame_pipeline_available()
+		and NativeBridgeClass.is_current_frame_solver_available()
+	)
 	return _core_available
 
 func _build_notice(message: String) -> void:
@@ -560,7 +563,7 @@ func _act_k64_set_mode(args: Dictionary) -> Dictionary:
 	return _provide_k64_status()
 
 func _act_k64_set_policy(args: Dictionary) -> Dictionary:
-	mitigation_mode = clampi(int(args.get("mode", mitigation_mode)), QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY, QuellAnalyzerClass.MitigationMode.ADAPTIVE)
+	mitigation_mode = clampi(int(args.get("mode", mitigation_mode)), MITIGATION_MODE_CURRENT_FRAME_ONLY, MITIGATION_MODE_ADAPTIVE)
 	_select_option_by_item_id(mitigation_mode_select, mitigation_mode)
 	_sync_analyzer_settings()
 	_reset_analysis_state()
@@ -672,10 +675,10 @@ func _act_k64_clear_history(_args: Dictionary) -> Dictionary:
 
 func _act_k64_set_spatial_sensitivity(args: Dictionary) -> Dictionary:
 	var requested: int = int(args.get("mode", args.get("value", spatial_sensitivity)))
-	if requested == QuellAnalyzerClass.SpatialSensitivity.BALANCED:
-		spatial_sensitivity = QuellAnalyzerClass.SpatialSensitivity.BALANCED
+	if requested == SPATIAL_SENSITIVITY_BALANCED:
+		spatial_sensitivity = SPATIAL_SENSITIVITY_BALANCED
 	else:
-		spatial_sensitivity = QuellAnalyzerClass.SpatialSensitivity.STRICT
+		spatial_sensitivity = SPATIAL_SENSITIVITY_STRICT
 	_select_option_by_item_id(spatial_sensitivity_select, int(spatial_sensitivity))
 	_sync_analyzer_settings()
 	_reset_analysis_state()
@@ -1006,16 +1009,16 @@ func _build_hud() -> void:
 	stack.add_child(mitigation_toggle)
 
 	mitigation_mode_select = OptionButton.new()
-	mitigation_mode_select.add_item("Current frame", QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY)
-	mitigation_mode_select.add_item("Temporal blend", QuellAnalyzerClass.MitigationMode.TEMPORAL_BLEND)
-	mitigation_mode_select.add_item("Adaptive", QuellAnalyzerClass.MitigationMode.ADAPTIVE)
+	mitigation_mode_select.add_item("Current frame", MITIGATION_MODE_CURRENT_FRAME_ONLY)
+	mitigation_mode_select.add_item("Temporal blend", MITIGATION_MODE_TEMPORAL_BLEND)
+	mitigation_mode_select.add_item("Adaptive", MITIGATION_MODE_ADAPTIVE)
 	mitigation_mode_select.select(int(mitigation_mode))
 	mitigation_mode_select.item_selected.connect(_on_mitigation_mode_selected)
 	stack.add_child(_with_caption("Policy", mitigation_mode_select))
 
 	spatial_sensitivity_select = OptionButton.new()
-	spatial_sensitivity_select.add_item("Balanced", QuellAnalyzerClass.SpatialSensitivity.BALANCED)
-	spatial_sensitivity_select.add_item("Strict", QuellAnalyzerClass.SpatialSensitivity.STRICT)
+	spatial_sensitivity_select.add_item("Balanced", SPATIAL_SENSITIVITY_BALANCED)
+	spatial_sensitivity_select.add_item("Strict", SPATIAL_SENSITIVITY_STRICT)
 	_select_option_by_item_id(spatial_sensitivity_select, int(spatial_sensitivity))
 	spatial_sensitivity_select.item_selected.connect(_on_spatial_sensitivity_selected)
 	stack.add_child(_with_caption("Spatial", spatial_sensitivity_select))
@@ -1051,8 +1054,8 @@ func _build_hud() -> void:
 	stack.add_child(game_budget_skip_raw_risk_toggle)
 
 	game_budget_policy_select = OptionButton.new()
-	game_budget_policy_select.add_item("Direct brightness", QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS)
-	game_budget_policy_select.add_item("Adaptive temporal filter", QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER)
+	game_budget_policy_select.add_item("Direct brightness", GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS)
+	game_budget_policy_select.add_item("Adaptive temporal filter", GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER)
 	_select_option_by_item_id(game_budget_policy_select, int(game_budget_policy))
 	game_budget_policy_select.item_selected.connect(_on_game_budget_policy_selected)
 	stack.add_child(_with_caption("Budget filter", game_budget_policy_select))
@@ -1433,6 +1436,8 @@ func _sync_analyzer_settings() -> void:
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
 	current_frame_solver.enabled = current_frame_solver_enabled
+	if _object_has_property(current_frame_solver, "analytic_enabled"):
+		current_frame_solver.analytic_enabled = current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "game_budget_enabled"):
 		current_frame_solver.game_budget_enabled = game_budget_enabled
 	if _object_has_property(current_frame_solver, "fast_identity_enabled"):
@@ -2005,12 +2010,12 @@ func _parse_game_budget_policy(value: Variant) -> int:
 	if value is String:
 		var text := String(value).to_lower()
 		if text == "atf" or text == "adaptive" or text == "adaptive_temporal_filter":
-			return QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
-		return QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS
-	return clampi(int(value), QuellAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS, QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER)
+			return GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
+		return GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS
+	return clampi(int(value), GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS, GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER)
 
 func _game_budget_policy_label() -> String:
-	if game_budget_policy == QuellAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER:
+	if game_budget_policy == GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER:
 		return "atf"
 	return "direct"
 
@@ -2081,14 +2086,14 @@ func _on_headroom_changed(value: float) -> void:
 	_refresh_static_labels()
 
 func _mitigation_mode_label() -> String:
-	if mitigation_mode == QuellAnalyzerClass.MitigationMode.CURRENT_FRAME_ONLY:
+	if mitigation_mode == MITIGATION_MODE_CURRENT_FRAME_ONLY:
 		return "current-frame"
-	if mitigation_mode == QuellAnalyzerClass.MitigationMode.TEMPORAL_BLEND:
+	if mitigation_mode == MITIGATION_MODE_TEMPORAL_BLEND:
 		return "temporal-blend %d%%" % roundi(temporal_blend_alpha * 100.0)
 	return "adaptive"
 
 func _spatial_sensitivity_label() -> String:
-	if spatial_sensitivity == QuellAnalyzerClass.SpatialSensitivity.BALANCED:
+	if spatial_sensitivity == SPATIAL_SENSITIVITY_BALANCED:
 		return "balanced"
 	return "strict"
 

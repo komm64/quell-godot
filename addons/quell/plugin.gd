@@ -1,10 +1,19 @@
 @tool
 extends EditorPlugin
 
-const RuntimeScript = preload("res://addons/quell/runtime/quell_runtime.gd")
+const NATIVE_RUNTIME_CLASS_NAME := "QuellRuntime"
+const NATIVE_EXTENSION_PATH := "res://addons/quell_core_native/quell_core_native.gdextension"
 
 func _enter_tree() -> void:
-	add_custom_type("QuellRuntime", "Node", RuntimeScript, null)
+	if ClassDB.class_exists(NATIVE_RUNTIME_CLASS_NAME):
+		return
+	if not FileAccess.file_exists(NATIVE_EXTENSION_PATH):
+		return
+	if not Engine.has_singleton("GDExtensionManager"):
+		return
+	var manager: Object = Engine.get_singleton("GDExtensionManager")
+	if manager != null and manager.has_method("load_extension"):
+		manager.load_extension(NATIVE_EXTENSION_PATH)
 
 func _exit_tree() -> void:
-	remove_custom_type("QuellRuntime")
+	pass

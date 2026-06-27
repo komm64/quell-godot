@@ -1,6 +1,7 @@
 .godot/
 .tmp/
 addons/quell_core/
+addons/quell_core_native/
 CLAUDE.md
 *.log
 *.tmp
