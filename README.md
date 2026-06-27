@@ -44,6 +44,12 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 - Developer Alpha demo launches in game-budget mode by default. Use
   `--quell-full-quality` or `--quell-no-game-budget` to run the heavier
   validation-oriented path.
+- Developer Alpha demo suppresses the debug menu and F1 toggle by default. Use
+  `--quell-debug-menu` to enable the debug panel and F1 toggle for local
+  development.
+- `QuellRuntime.enabled` disables Quell analysis and correction as a whole.
+  `mitigation_enabled` keeps analysis running and only bypasses correction, so
+  Raw/After comparison remains available.
 - HUD graph for Raw, After, and mitigation strength
 - `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
   actual scene color buffer and applies mitigation before display.

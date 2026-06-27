@@ -94,8 +94,10 @@ const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
 const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 6
 const FRAME_SEQUENCE_PRELOAD_LIMIT: int = 96
 const GAME_BUDGET_DEFAULT_ENABLED: bool = true
+const DEBUG_MENU_DEFAULT_ENABLED: bool = false
 var elapsed_seconds := 0.0
 var current_mode := 0
+var quell_enabled := true
 var mitigation_enabled := true
 var mitigation_mode := 0
 var temporal_blend_alpha := 0.50
@@ -113,6 +115,7 @@ var viewing_distance_m := 0.60
 var headroom_margin := 0.80
 var contribution_enabled: Dictionary = {}
 var debug_menu_hidden := false
+var debug_menu_toggle_enabled := DEBUG_MENU_DEFAULT_ENABLED
 
 var analyzer
 var after_analyzer
@@ -124,6 +127,7 @@ var source_viewport: SubViewport
 var source_display: TextureRect
 var content_material: ShaderMaterial
 var mode_select: OptionButton
+var quell_toggle: CheckButton
 var mitigation_mode_select: OptionButton
 var spatial_sensitivity_select: OptionButton
 var mitigation_toggle: CheckButton
@@ -186,7 +190,15 @@ func _ready() -> void:
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
 	_legacy_risk_graph_enabled = _cmdline_has_flag("--quell-legacy-risk-graph")
-	debug_menu_hidden = _cmdline_has_flag("--quell-risk-graph-only") or _cmdline_has_flag("--quell-hide-debug-menu") or _cmdline_has_flag("--quell-no-debug-menu")
+	debug_menu_toggle_enabled = DEBUG_MENU_DEFAULT_ENABLED
+	if _cmdline_has_flag("--quell-debug-menu") or _cmdline_has_flag("--quell-enable-debug-menu"):
+		debug_menu_toggle_enabled = true
+	if _cmdline_has_flag("--quell-no-debug-menu-toggle"):
+		debug_menu_toggle_enabled = false
+	debug_menu_hidden = (not debug_menu_toggle_enabled) or _cmdline_has_flag("--quell-risk-graph-only") or _cmdline_has_flag("--quell-hide-debug-menu") or _cmdline_has_flag("--quell-no-debug-menu")
+	quell_enabled = not (_cmdline_has_flag("--quell-disabled") or _cmdline_has_flag("--quell-off"))
+	if _cmdline_has_flag("--quell-enabled") or _cmdline_has_flag("--quell-on"):
+		quell_enabled = true
 	game_budget_enabled = GAME_BUDGET_DEFAULT_ENABLED
 	if _cmdline_has_flag("--quell-full-quality") or _cmdline_has_flag("--quell-no-game-budget"):
 		game_budget_enabled = false
@@ -284,7 +296,7 @@ func _input(event: InputEvent) -> void:
 		_on_clear_history_pressed()
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F1:
-		if debug_panel != null:
+		if debug_menu_toggle_enabled and debug_panel != null:
 			debug_panel.visible = not debug_panel.visible
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F2:
@@ -311,6 +323,7 @@ func _start_k64_io() -> void:
 		"volatility": "per-frame",
 		"fields": [
 			{"name": "source", "type": "string", "doc": "selected source mode"},
+			{"name": "quell_enabled", "type": "bool", "doc": "whole Quell runtime toggle"},
 			{"name": "mitigation_enabled", "type": "bool", "doc": "UI mitigation toggle"},
 			{"name": "mitigation_mode", "type": "int", "doc": "QuellAnalyzer.MitigationMode enum value"},
 			{"name": "headroom_margin", "type": "float", "doc": "After target slider"},
@@ -340,6 +353,9 @@ func _start_k64_io() -> void:
 	})
 	io.call("register_action", "quell_set_policy", Callable(self, "_act_k64_set_policy"), {
 		"args": [{"name": "mode", "type": "int"}],
+	})
+	io.call("register_action", "quell_set_enabled", Callable(self, "_act_k64_set_enabled"), {
+		"args": [{"name": "enabled", "type": "bool"}],
 	})
 	io.call("register_action", "quell_set_mitigation", Callable(self, "_act_k64_set_mitigation"), {
 		"args": [{"name": "enabled", "type": "bool"}],
@@ -484,6 +500,7 @@ func _provide_k64_status() -> Dictionary:
 		analysis_size = gpu_frame_pipeline.get_analysis_size()
 	return {
 		"source": String(source.get("name", "")),
+		"quell_enabled": quell_enabled,
 		"mitigation_enabled": mitigation_enabled,
 		"mitigation_mode": int(mitigation_mode),
 		"headroom_margin": headroom_margin,
@@ -572,6 +589,14 @@ func _act_k64_set_mode(args: Dictionary) -> Dictionary:
 func _act_k64_set_policy(args: Dictionary) -> Dictionary:
 	mitigation_mode = clampi(int(args.get("mode", mitigation_mode)), MITIGATION_MODE_CURRENT_FRAME_ONLY, MITIGATION_MODE_ADAPTIVE)
 	_select_option_by_item_id(mitigation_mode_select, mitigation_mode)
+	_sync_analyzer_settings()
+	_reset_analysis_state()
+	return _provide_k64_status()
+
+func _act_k64_set_enabled(args: Dictionary) -> Dictionary:
+	quell_enabled = bool(args.get("enabled", args.get("value", quell_enabled)))
+	if quell_toggle != null:
+		quell_toggle.set_pressed_no_signal(quell_enabled)
 	_sync_analyzer_settings()
 	_reset_analysis_state()
 	return _provide_k64_status()
@@ -729,7 +754,10 @@ func _process(delta: float) -> void:
 	var has_gpu_frame_pipeline := _has_gpu_frame_pipeline()
 	_profile_add("ready_us", Time.get_ticks_usec() - ready_start)
 	if DisplayServer.get_name() == "headless":
-		if _is_frame_sequence_source(source):
+		if not quell_enabled:
+			metrics = _disabled_metrics(elapsed_seconds, "headless-disabled")
+			shader_parameters = _disabled_shader_parameters(metrics)
+		elif _is_frame_sequence_source(source):
 			var headless_sequence_image = _load_frame_sequence_image_for_demo(source, delta)
 			if headless_sequence_image != null:
 				metrics = analyzer.update_from_image(headless_sequence_image, delta, elapsed_seconds)
@@ -760,9 +788,21 @@ func _process(delta: float) -> void:
 				metrics = _last_frame_sequence_metrics.duplicate(false)
 				metrics["metric_backend"] = "gpu-frame-seq-cached"
 				_profile_add("cache_us", Time.get_ticks_usec() - cache_start)
-				if mitigation_enabled and gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null:
+				if not quell_enabled:
+					metrics = _disabled_metrics(elapsed_seconds, "gpu-frame-seq-disabled")
+					_last_runtime_metrics = metrics.duplicate(false)
+					_last_frame_sequence_metrics = metrics.duplicate(false)
+					var disabled_cached_hud_start := Time.get_ticks_usec()
+					_update_hud(metrics)
+					_profile_add("hud_us", Time.get_ticks_usec() - disabled_cached_hud_start)
+					_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+					_profile_sample()
+					return
+				if not mitigation_enabled or (gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null):
 					var held_after_metrics: Dictionary
-					if _should_measure_after(metrics):
+					if not mitigation_enabled:
+						held_after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
+					elif _should_measure_after(metrics):
 						_after_sample_count += 1
 						_last_after_sample_frame = _process_frame_count
 						var held_after_start := Time.get_ticks_usec()
@@ -794,6 +834,23 @@ func _process(delta: float) -> void:
 			var generate_start := Time.get_ticks_usec()
 			gpu_frame_pipeline.generate_source(source_config, elapsed_seconds, envelope)
 			_profile_add("texture_us", Time.get_ticks_usec() - generate_start)
+		if not quell_enabled:
+			metrics = _disabled_metrics(elapsed_seconds, "gpu-frame-seq-disabled" if uploaded_sequence_frame else "gpu-disabled")
+			shader_parameters = _disabled_shader_parameters(metrics)
+			var disabled_mitigate_start := Time.get_ticks_usec()
+			gpu_frame_pipeline.apply_mitigation(shader_parameters)
+			_profile_add("texture_us", Time.get_ticks_usec() - disabled_mitigate_start)
+			_last_runtime_metrics = metrics.duplicate(false)
+			_last_after_metrics = metrics.duplicate(false)
+			_last_shader_parameters = shader_parameters.duplicate(false)
+			if uploaded_sequence_frame:
+				_last_frame_sequence_metrics = metrics.duplicate(false)
+			var disabled_hud_start := Time.get_ticks_usec()
+			_update_hud(metrics)
+			_profile_add("hud_us", Time.get_ticks_usec() - disabled_hud_start)
+			_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
+			_profile_sample()
+			return
 		if not uploaded_sequence_frame and not _should_sample_raw():
 			var reuse_start := Time.get_ticks_usec()
 			metrics = _last_runtime_metrics.duplicate(false)
@@ -806,7 +863,9 @@ func _process(delta: float) -> void:
 			_profile_add("texture_us", Time.get_ticks_usec() - held_mitigate_start)
 			var held_after_start := Time.get_ticks_usec()
 			var skipped_after_metrics: Dictionary
-			if mitigation_enabled and _should_measure_after(metrics):
+			if not mitigation_enabled:
+				skipped_after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
+			elif _should_measure_after(metrics):
 				_after_sample_count += 1
 				_last_after_sample_frame = _process_frame_count
 				skipped_after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
@@ -853,19 +912,21 @@ func _process(delta: float) -> void:
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		var shader_start := Time.get_ticks_usec()
 		shader_parameters = _shader_parameters_for_metrics(metrics)
-		var solver_result: Dictionary = current_frame_solver.solve(
-			gpu_frame_pipeline,
-			gpu_after_analyzer,
-			after_analyzer,
-			shader_parameters,
-			headroom_margin,
-			after_analysis_delta,
-			elapsed_seconds,
-			"frame_sequence" if uploaded_sequence_frame else "generated",
-			null,
-			false,
-			metrics
-		)
+		var solver_result: Dictionary = {}
+		if mitigation_enabled:
+			solver_result = current_frame_solver.solve(
+				gpu_frame_pipeline,
+				gpu_after_analyzer,
+				after_analyzer,
+				shader_parameters,
+				headroom_margin,
+				after_analysis_delta,
+				elapsed_seconds,
+				"frame_sequence" if uploaded_sequence_frame else "generated",
+				null,
+				false,
+				metrics
+			)
 		shader_parameters = solver_result.get("parameters", shader_parameters)
 		_apply_current_frame_solver_metrics(metrics, solver_result)
 		analyzer.apply_current_frame_shader_solution(shader_parameters, metrics)
@@ -879,7 +940,7 @@ func _process(delta: float) -> void:
 		var after_analyze_start := Time.get_ticks_usec()
 		var after_metrics: Dictionary
 		if not mitigation_enabled:
-			after_metrics = metrics.duplicate(true)
+			after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
 		elif _should_measure_after(metrics):
 			_after_sample_count += 1
 			_last_after_sample_frame = _process_frame_count
@@ -901,10 +962,14 @@ func _process(delta: float) -> void:
 			_last_frame_sequence_metrics = metrics.duplicate(false)
 			_profile_add("store_us", Time.get_ticks_usec() - store_start)
 	else:
-		metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
-		metrics["metric_backend"] = "generated"
-		shader_parameters = _shader_parameters_for_metrics(metrics)
-		_apply_shader_parameter_metrics(metrics, shader_parameters)
+		if not quell_enabled:
+			metrics = _disabled_metrics(elapsed_seconds, "generated-disabled")
+			shader_parameters = _disabled_shader_parameters(metrics)
+		else:
+			metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
+			metrics["metric_backend"] = "generated"
+			shader_parameters = _shader_parameters_for_metrics(metrics)
+			_apply_shader_parameter_metrics(metrics, shader_parameters)
 	var hud_start := Time.get_ticks_usec()
 	_update_hud(metrics)
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
@@ -1017,6 +1082,12 @@ func _build_hud() -> void:
 		mode_select.add_item(config["name"])
 	mode_select.item_selected.connect(_on_mode_selected)
 	stack.add_child(_with_caption("Source", mode_select))
+
+	quell_toggle = CheckButton.new()
+	quell_toggle.text = "Quell"
+	quell_toggle.button_pressed = quell_enabled
+	quell_toggle.toggled.connect(_on_quell_toggled)
+	stack.add_child(quell_toggle)
 
 	mitigation_toggle = CheckButton.new()
 	mitigation_toggle.text = "Mitigation"
@@ -1333,6 +1404,16 @@ func _shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
 		return analyzer.game_budget_shader_parameters(metrics)
 	return analyzer.shader_parameters(metrics)
 
+func _disabled_shader_parameters(metrics: Dictionary) -> Dictionary:
+	var was_mitigation_enabled: bool = mitigation_enabled
+	mitigation_enabled = false
+	_sync_analyzer_settings()
+	var parameters: Dictionary = _shader_parameters_for_metrics(metrics)
+	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, 0.0)
+	mitigation_enabled = was_mitigation_enabled
+	_sync_analyzer_settings()
+	return parameters
+
 func _analyze_raw_source_texture(time_seconds: float) -> Dictionary:
 	if (
 		game_budget_enabled
@@ -1361,6 +1442,8 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 
 func _visible_after_risk_for_metrics(metrics: Dictionary, after_metrics: Dictionary) -> float:
 	var measured_risk: float = float(after_metrics.get("raw_risk", 0.0))
+	if not mitigation_enabled:
+		return measured_risk
 	if game_budget_enabled and metrics.has("solver_after_risk"):
 		return min(measured_risk, float(metrics.get("solver_after_risk", measured_risk)))
 	return measured_risk
@@ -1380,7 +1463,7 @@ func _update_hud(metrics: Dictionary) -> void:
 		metric_bars[key].value = clamp(value, 0.0, 1.0)
 		metric_labels[key].text = "%3d%%" % roundi(value * 100.0)
 
-	var state := "off" if not mitigation_enabled else ("active" if float(metrics["mitigation"]) > 0.01 else "idle")
+	var state := "disabled" if not quell_enabled else ("off" if not mitigation_enabled else ("active" if float(metrics["mitigation"]) > 0.01 else "idle"))
 	var drop_percent := roundi(float(metrics["reduction_ratio"]) * 100.0)
 	var display_size := _display_size()
 	var analysis_size: Vector2i = _analysis_size_for_display(display_size)
@@ -1434,7 +1517,7 @@ func _demo_risk_envelope(cycle_hz: float) -> float:
 func _sync_analyzer_settings() -> void:
 	analyzer.viewing_distance_m = viewing_distance_m
 	analyzer.headroom_margin = headroom_margin
-	analyzer.mitigation_enabled = mitigation_enabled
+	analyzer.mitigation_enabled = quell_enabled and mitigation_enabled
 	analyzer.mitigation_mode = mitigation_mode
 	analyzer.temporal_blend_alpha = temporal_blend_alpha
 	analyzer.max_contrast_compression = max_contrast_compression
@@ -1460,9 +1543,9 @@ func _sync_analyzer_settings() -> void:
 	_apply_contribution_settings(after_analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
-	current_frame_solver.enabled = current_frame_solver_enabled
+	current_frame_solver.enabled = quell_enabled and current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "analytic_enabled"):
-		current_frame_solver.analytic_enabled = current_frame_solver_enabled
+		current_frame_solver.analytic_enabled = quell_enabled and current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "game_budget_enabled"):
 		current_frame_solver.game_budget_enabled = game_budget_enabled
 	if _object_has_property(current_frame_solver, "fast_identity_enabled"):
@@ -1767,6 +1850,40 @@ func _held_after_metrics(metrics: Dictionary, _delta: float, source_label: Strin
 	after_metrics["time"] = elapsed_seconds
 	return after_metrics
 
+func _disabled_metrics(time_seconds: float, source_label: String) -> Dictionary:
+	return {
+		"time": time_seconds,
+		"luminance": 0.0,
+		"red": 0.0,
+		"spatial": 0.0,
+		"trend": 0.0,
+		"raw_risk": 0.0,
+		"output_risk": 0.0,
+		"risk_reduction": 0.0,
+		"reduction_ratio": 0.0,
+		"next_mitigation": 0.0,
+		"mitigation": 0.0,
+		"brightness_control": 0.0,
+		"contrast_control": 0.0,
+		"feedback_control": 0.0,
+		"local_correction": 0.0,
+		"general_flash_count": 0,
+		"red_flash_count": 0,
+		"general_flash_area": 0.0,
+		"red_flash_area": 0.0,
+		"metric_backend": source_label,
+	}
+
+func _raw_as_after_metrics(metrics: Dictionary, source_label: String) -> Dictionary:
+	var after_metrics := metrics.duplicate(true)
+	var raw_risk: float = float(metrics.get("raw_risk", metrics.get("solver_after_risk", 0.0)))
+	after_metrics["raw_risk"] = raw_risk
+	after_metrics["estimated_raw_risk"] = raw_risk
+	after_metrics["source"] = source_label
+	after_metrics["measurement_skipped"] = true
+	after_metrics["time"] = elapsed_seconds
+	return after_metrics
+
 func _measure_after_for_source(source: Dictionary, time_seconds: float, delta: float) -> Dictionary:
 	var after_gpu_metrics: Dictionary = gpu_after_analyzer.analyze_texture(gpu_frame_pipeline.analysis_after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after"
@@ -1978,6 +2095,11 @@ func _on_mode_selected(index: int) -> void:
 
 func _on_mitigation_toggled(enabled: bool) -> void:
 	mitigation_enabled = enabled
+	_sync_analyzer_settings()
+	_reset_analysis_state()
+
+func _on_quell_toggled(enabled: bool) -> void:
+	quell_enabled = enabled
 	_sync_analyzer_settings()
 	_reset_analysis_state()
 
