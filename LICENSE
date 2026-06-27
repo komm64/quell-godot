@@ -1,0 +1,68 @@
+Quell Developer Alpha Evaluation License 0.1
+
+Copyright (c) 2026 komm64. All rights reserved.
+
+This license applies to the Quell Godot Developer Alpha package and the native
+Quell runtime files included with that package.
+
+1. Evaluation Grant
+
+Subject to this license, komm64 grants you a non-exclusive, non-transferable
+right to install and use the Quell Godot Developer Alpha package solely for
+evaluation, testing, and integration prototyping in Godot projects on supported
+platforms listed in the package manifest.
+
+2. No Production Use
+
+You may not use this developer alpha package in a shipped game, application,
+commercial release, public demo, public test, production build, or any other
+end-user product. A separate product license and separate product binaries are
+required for production use.
+
+3. No Redistribution
+
+You may not redistribute, sublicense, sell, publish, mirror, or include this
+package or its native binaries in another asset package, repository, template,
+SDK, installer, or product. You may share copies inside your own organization
+only as needed for the evaluation grant above.
+
+4. No Reverse Engineering or Circumvention
+
+You may not reverse engineer, decompile, disassemble, modify, patch, wrap, or
+circumvent the native binaries or the developer-alpha output overlay. You may
+not remove, hide, obscure, disable, or alter the Quell logo, URL, Risk graph,
+or other developer-alpha markings.
+
+5. No Medical, Safety, or Certification Claims
+
+The developer alpha package is not a medical device, diagnostic tool,
+prevention or treatment tool, certification service, standards-conformance
+checker, or guarantee that content is safe for photosensitive viewers. Raw Risk
+and After Risk are internal Quell software signals, not clinical risk estimates.
+You may not represent evaluation results as medical advice, safety assurance,
+regulatory compliance, or third-party certification.
+
+6. Ownership
+
+The package is licensed, not sold. komm64 retains all rights, title, and
+interest in and to Quell, including the native runtime, algorithms, shaders,
+names, logos, and related intellectual property.
+
+7. No Warranty
+
+The package is provided "as is", without warranties of any kind, express or
+implied, including warranties of merchantability, fitness for a particular
+purpose, non-infringement, accuracy, performance, or availability.
+
+8. Limitation of Liability
+
+To the maximum extent permitted by law, komm64 is not liable for indirect,
+incidental, special, consequential, exemplary, or punitive damages, or for lost
+profits, lost revenue, lost data, business interruption, or claims arising from
+use of or inability to use the package.
+
+9. Termination
+
+Your rights under this license terminate automatically if you violate this
+license. Upon termination, you must stop using the package and delete all copies
+in your possession or control.

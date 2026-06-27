@@ -71,4 +71,8 @@ Quell signals, not clinical risk estimates.
 
 ## License
 
-TBD for the public wrapper.
+Quell Godot Developer Alpha uses the Quell Developer Alpha Evaluation License
+0.1. See `LICENSE`.
+
+The current alpha package is for Windows x86_64 developer evaluation only. It
+does not grant production-use rights.
