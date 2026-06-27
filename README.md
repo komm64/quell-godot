@@ -47,12 +47,18 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 
 ## Addon Use
 
-Copy the developer-beta package contents into a Godot project and open the
+Copy the developer-alpha package contents into a Godot project and open the
 project once in the Godot editor so the `.gdextension` is indexed. The public
 node-facing API is the native `QuellRuntime` class. The analyzer, feedback
 controller, solver, GPU metric reducer, mitigation compute shaders, and
-required developer-beta logo/URL/Risk overlay are implementation details
+required developer-alpha logo/URL/Risk overlay are implementation details
 supplied by the native core addon.
+
+Developer-alpha packages are experimental developer evaluation builds. They are
+not medical devices, diagnostic tools, prevention or treatment tools,
+certification services, standards-conformance checkers, or guarantees that
+content is safe for photosensitive viewers. Raw Risk and After Risk are internal
+Quell signals, not clinical risk estimates.
 
 ## License
 

@@ -781,7 +781,7 @@ func _process(delta: float) -> void:
 			_frame_sequence_pending_analysis_delta = 0.0
 			if gpu_sequence_image != null:
 				var upload_start := Time.get_ticks_usec()
-				uploaded_sequence_frame = gpu_frame_pipeline.upload_source_image(gpu_sequence_image, true)
+				uploaded_sequence_frame = gpu_frame_pipeline.upload_source_image(gpu_sequence_image, false)
 				_profile_add("texture_us", Time.get_ticks_usec() - upload_start)
 		if not uploaded_sequence_frame:
 			var source_config := source.duplicate(true)
@@ -812,6 +812,10 @@ func _process(delta: float) -> void:
 			_apply_measured_after_metrics(metrics, skipped_after_metrics, after_analysis_delta)
 			_last_after_metrics = skipped_after_metrics.duplicate(false)
 			_last_runtime_metrics = metrics.duplicate(false)
+			_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))))
+			if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
+				gpu_frame_pipeline.refresh_developer_alpha_overlay(shader_parameters)
+			_last_shader_parameters = shader_parameters.duplicate(false)
 			if uploaded_sequence_frame:
 				_last_frame_sequence_metrics = metrics.duplicate(false)
 			_profile_add("feedback_us", Time.get_ticks_usec() - skipped_feedback_start)
@@ -861,6 +865,7 @@ func _process(delta: float) -> void:
 		_apply_current_frame_solver_metrics(metrics, solver_result)
 		analyzer.apply_current_frame_shader_solution(shader_parameters, metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
+		_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
 		_last_shader_parameters = shader_parameters.duplicate(false)
 		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
 		var mitigate_start := Time.get_ticks_usec()
@@ -881,6 +886,10 @@ func _process(delta: float) -> void:
 		_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
 		_last_after_metrics = after_metrics.duplicate(false)
 		_last_runtime_metrics = metrics.duplicate(false)
+		_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))))
+		if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
+			gpu_frame_pipeline.refresh_developer_alpha_overlay(shader_parameters)
+		_last_shader_parameters = shader_parameters.duplicate(false)
 		_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
 		if uploaded_sequence_frame:
 			var store_start := Time.get_ticks_usec()
@@ -1307,6 +1316,12 @@ func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary
 	metrics["contrast_control"] = 1.0 - float(parameters.get("contrast_scale_limit", 1.0))
 	metrics["feedback_control"] = 1.0 - float(parameters.get("temporal_blend_alpha", 1.0))
 	metrics["local_correction"] = float(parameters.get("local_correction_strength", 0.0))
+
+func _apply_overlay_metrics_to_shader_parameters(parameters: Dictionary, metrics: Dictionary, output_risk: float) -> void:
+	parameters["raw_risk_for_overlay"] = clampf(float(metrics.get("raw_risk", 0.0)), 0.0, 1.50)
+	parameters["output_risk_for_overlay"] = clampf(output_risk, 0.0, 1.50)
+	parameters["target_risk_for_overlay"] = headroom_margin
+	parameters["time_for_overlay"] = float(metrics.get("time", elapsed_seconds))
 
 func _shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
 	if game_budget_enabled and analyzer != null and analyzer.has_method("game_budget_shader_parameters"):
@@ -1903,23 +1918,23 @@ func _ensure_gpu_frame_pipeline_size(source: Dictionary) -> void:
 		_reset_analysis_state(false)
 
 func _pipeline_display_size_for_source(source: Dictionary) -> Vector2i:
-	if game_budget_enabled:
-		return _display_size()
-	if _is_frame_sequence_source(source):
-		var source_id := String(source.get("id", ""))
-		var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
-		if not frame_paths.is_empty():
-			var image: Image = _load_frame_sequence_path(String(frame_paths[0]))
-			if image != null and not image.is_empty():
-				return Vector2i(maxi(1, image.get_width()), maxi(1, image.get_height()))
 	return _display_size()
 
 func _pipeline_analysis_size_for_source(source: Dictionary, display_size: Vector2i) -> Vector2i:
 	if game_budget_enabled:
 		return _analysis_size_for_display_with_divisor(display_size, GAME_BUDGET_ANALYSIS_SCALE_DIVISOR)
 	if _is_frame_sequence_source(source) and not game_budget_enabled:
-		return display_size
+		return _frame_sequence_source_size(source)
 	return _analysis_size_for_display(display_size)
+
+func _frame_sequence_source_size(source: Dictionary) -> Vector2i:
+	var source_id := String(source.get("id", ""))
+	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
+	if not frame_paths.is_empty():
+		var image: Image = _load_frame_sequence_path(String(frame_paths[0]))
+		if image != null and not image.is_empty():
+			return Vector2i(maxi(1, image.get_width()), maxi(1, image.get_height()))
+	return _analysis_size_for_display(_display_size())
 
 func _set_content_shader_parameter(parameter: StringName, value: Variant) -> void:
 	if content_material != null:
