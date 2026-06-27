@@ -2,9 +2,8 @@
 
 Godot binding and demo project for Quell.
 
-This repository contains the public Godot addon wrapper:
+This repository contains the public Godot demo wrapper:
 
-- `addons/quell` contains public addon metadata.
 - `QuellRuntime` is provided by the synced native GDExtension.
 - `scripts/` and `scenes/` contain the demo UI and risk graph.
 - The analysis and mitigation implementation is provided separately during
@@ -48,12 +47,12 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 
 ## Addon Use
 
-Copy the developer-beta package contents into a Godot project and enable
-**Project > Project Settings > Plugins > Quell**. The public node-facing API is
-the native `QuellRuntime` class. The analyzer, feedback controller, solver, GPU
-metric reducer, mitigation compute shaders, and required developer-beta
-logo/URL/Risk overlay are implementation details supplied by the native core
-addon.
+Copy the developer-beta package contents into a Godot project and open the
+project once in the Godot editor so the `.gdextension` is indexed. The public
+node-facing API is the native `QuellRuntime` class. The analyzer, feedback
+controller, solver, GPU metric reducer, mitigation compute shaders, and
+required developer-beta logo/URL/Risk overlay are implementation details
+supplied by the native core addon.
 
 ## License
 
