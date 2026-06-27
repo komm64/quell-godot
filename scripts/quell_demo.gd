@@ -172,6 +172,7 @@ var _last_raw_sample_frame: int = -999999
 var _last_after_sample_frame: int = -999999
 var _next_hud_update_time: float = 0.0
 var _profile_enabled: bool = false
+var _legacy_risk_graph_enabled: bool = false
 var _profile_accum: Dictionary = {}
 var _profile_next_report: float = 0.0
 
@@ -183,6 +184,7 @@ func _ready() -> void:
 		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
+	_legacy_risk_graph_enabled = _cmdline_has_flag("--quell-legacy-risk-graph")
 	debug_menu_hidden = _cmdline_has_flag("--quell-risk-graph-only") or _cmdline_has_flag("--quell-hide-debug-menu") or _cmdline_has_flag("--quell-no-debug-menu")
 	game_budget_enabled = _cmdline_has_flag("--quell-game-budget") or _cmdline_has_flag("--quell-game-budget-mode")
 	game_budget_skip_raw_risk = _cmdline_has_flag("--quell-game-budget-skip-raw-risk") or _cmdline_has_flag("--quell-game-budget-control-only")
@@ -281,7 +283,7 @@ func _input(event: InputEvent) -> void:
 			debug_panel.visible = not debug_panel.visible
 		get_viewport().set_input_as_handled()
 	elif keycode == KEY_F2:
-		if risk_graph != null:
+		if _legacy_risk_graph_enabled and risk_graph != null:
 			risk_graph.visible = not risk_graph.visible
 		get_viewport().set_input_as_handled()
 
@@ -1142,17 +1144,19 @@ func _build_hud() -> void:
 	status_label.add_theme_color_override("font_color", Color(0.70, 0.78, 0.82))
 	stack.add_child(status_label)
 
-	risk_graph = RiskGraphClass.new()
-	risk_graph.headroom_margin = headroom_margin
-	risk_graph.anchor_left = 1.0
-	risk_graph.anchor_top = 1.0
-	risk_graph.anchor_right = 1.0
-	risk_graph.anchor_bottom = 1.0
-	risk_graph.offset_left = -456.0
-	risk_graph.offset_top = -224.0
-	risk_graph.offset_right = -16.0
-	risk_graph.offset_bottom = -16.0
-	hud_layer.add_child(risk_graph)
+	if _legacy_risk_graph_enabled:
+		risk_graph = RiskGraphClass.new()
+		risk_graph.headroom_margin = headroom_margin
+		risk_graph.anchor_left = 1.0
+		risk_graph.anchor_top = 1.0
+		risk_graph.anchor_right = 1.0
+		risk_graph.anchor_bottom = 1.0
+		risk_graph.offset_left = -456.0
+		risk_graph.offset_top = -224.0
+		risk_graph.offset_right = -16.0
+		risk_graph.offset_bottom = -16.0
+		risk_graph.visible = false
+		hud_layer.add_child(risk_graph)
 
 	_refresh_static_labels()
 
@@ -1345,7 +1349,8 @@ func _update_hud(metrics: Dictionary) -> void:
 	if elapsed_seconds + 0.0001 < _next_hud_update_time:
 		return
 	_next_hud_update_time = elapsed_seconds + (1.0 / HUD_UPDATE_HZ)
-	risk_graph.add_sample(elapsed_seconds, metrics)
+	if risk_graph != null:
+		risk_graph.add_sample(elapsed_seconds, metrics)
 	_refresh_frame_sequence_seek_ui()
 
 	for key in metric_bars.keys():
