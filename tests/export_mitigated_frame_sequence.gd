@@ -4,9 +4,10 @@ const RuntimeAnalyzerClass = preload("res://addons/quell_core/runtime/quell_anal
 const GpuAnalyzerClass = preload("res://addons/quell_core/runtime/quell_gpu_analyzer.gd")
 const FramePipelineClass = preload("res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd")
 const CurrentFrameSolverClass = preload("res://addons/quell_core/runtime/quell_current_frame_solver.gd")
+const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
-const CONTROL_CSV_HEADER := "Frame,TimeSeconds,SourceFrame,RawRisk,AfterRisk,ControlRisk,RawSourceControlRisk,TemporalRawAfterActivity,TemporalAfterPressure,AnalyzerStrength,ShaderStrength,MitigationMode,RedSuppression,ContrastReduction,BlurStrength,LuminanceDeltaLimit,ContrastScaleLimit,SpatialContrastLimit,TemporalBlendAlpha,MitigationEnabledSignal,CorrectionMixAlpha,TemporalProjectionStrength,SolverCorrectionScale,SolverIdentityAfterRisk,SolverAfterRisk,EffectiveBrightness,EffectiveContrast,EffectiveFeedback,RawGeneralFlashCount,AfterGeneralFlashCount,RawRedFlashCount,AfterRedFlashCount,RawGeneralFlashArea,AfterGeneralFlashArea,RawRedFlashArea,AfterRedFlashArea,GameBudgetControlRisk,GameBudgetRawAfterActivity,GameBudgetHighAreaPressure,GameBudgetOutputHistoryPressure,GameBudgetLuminanceEventPressure,GameBudgetAfterHistoryHold,GameBudgetAfterHistoryPressure,GameBudgetBurstHold,GameBudgetFlashImpulse,GameBudgetFlashDebt,GameBudgetFlashDebtState,GameBudgetTargetPressure,GameBudgetReleaseSlowdown,GameBudgetReleaseRate"
+const CONTROL_CSV_HEADER := "Frame,TimeSeconds,SourceFrame,RawRisk,AfterRisk,ControlRisk,RawSourceControlRisk,CurrentRawDetectorRisk,OutputRisk,PreviousAfterRisk,TemporalRawAfterActivity,TemporalAfterPressure,CurrentFrameAfterBudgetGuardActivity,TemporalSourceActivity,TemporalAfterActivity,TemporalAfterFeedbackActivity,RedCurrentArea,CurrentHighLuminanceArea,FrameLuminanceContrast,TemporalLuminanceContrast,AnalyzerStrength,ShaderStrength,MitigationMode,RedSuppression,ContrastReduction,BlurStrength,LuminanceDeltaLimit,ContrastScaleLimit,SpatialContrastLimit,TemporalBlendAlpha,MitigationEnabledSignal,CorrectionMixAlpha,TemporalProjectionStrength,SolverCorrectionScale,SolverIdentityAfterRisk,SolverAfterRisk,EffectiveBrightness,EffectiveContrast,EffectiveFeedback,RawGeneralFlashCount,AfterGeneralFlashCount,RawRedFlashCount,AfterRedFlashCount,RawGeneralFlashArea,AfterGeneralFlashArea,RawRedFlashArea,AfterRedFlashArea,GameBudgetControlRisk,GameBudgetRawAfterActivity,GameBudgetHighAreaPressure,GameBudgetOutputHistoryPressure,GameBudgetLuminanceEventPressure,GameBudgetAfterHistoryHold,GameBudgetAfterHistoryPressure,GameBudgetBurstHold,GameBudgetFlashImpulse,GameBudgetFlashDebt,GameBudgetFlashDebtState,GameBudgetTargetPressure,GameBudgetReleaseSlowdown,GameBudgetReleaseRate"
 const DEFAULT_INPUT_DIR := "res://validation/private/demo-videos/pokemon-shock/frames"
 const DEFAULT_OUTPUT_DIR := "res://validation/private/mitigation/pokemon-shock-quell-after"
 const DEFAULT_SOURCE_FPS := 1199.0 / 50.0
@@ -14,11 +15,13 @@ const DEFAULT_OUTPUT_FPS := 30.0
 const DEFAULT_DISPLAY_SIZE := Vector2i(1280, 720)
 const DEFAULT_ANALYSIS_SIZE := Vector2i(256, 144)
 const DEFAULT_TARGET_RISK := 0.80
-const GAME_BUDGET_ANALYSIS_SCALE_DIVISOR: int = 8
+const GAME_BUDGET_ANALYSIS_SCALE_DIVISOR: int = 16
 const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
-const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 6
+const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 1
 const TEMPORAL_VISUAL_CONTROL_GAIN := 1.36
 const CURRENT_VISUAL_CONTROL_GAIN := 1.10
+const GAME_BUDGET_PROJECTION_LEGACY := 0
+const GAME_BUDGET_PROJECTION_CLOSED_FORM := 1
 
 var _input_dir := DEFAULT_INPUT_DIR
 var _output_dir := DEFAULT_OUTPUT_DIR
@@ -33,6 +36,8 @@ var _analytic_solver_enabled := false
 var _game_budget_enabled := false
 var _game_budget_skip_raw_risk := false
 var _game_budget_policy: int = RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+var _game_budget_projection_mode: int = GAME_BUDGET_PROJECTION_CLOSED_FORM
+var _solver_fast_identity := -1
 var _raw_spatial_override_enabled := true
 var _after_spatial_override_enabled := true
 var _solver_preview_spatial_readback_enabled := true
@@ -40,6 +45,10 @@ var _match_source_size := false
 var _live_cadence := false
 var _max_seconds := 0.0
 var _max_frames := 0
+var _native_enabled := false
+var _save_visible_after_output := false
+var _solver_bisection_steps := -1
+var _debug_preview_frame := -1
 var _failed := false
 var _rd: RenderingDevice
 
@@ -60,13 +69,18 @@ func _init() -> void:
 	var output_abs := _globalize_path(_output_dir)
 	var raw_dir := output_abs.path_join("raw")
 	var after_dir := output_abs.path_join("after")
+	var visible_after_dir := output_abs.path_join("visible_after")
 	_make_dir(raw_dir)
 	_make_dir(after_dir)
+	if _save_visible_after_output:
+		_make_dir(visible_after_dir)
 	if _failed:
 		quit(1)
 		return
 	_clean_frame_dir(raw_dir)
 	_clean_frame_dir(after_dir)
+	if _save_visible_after_output:
+		_clean_frame_dir(visible_after_dir)
 	_remove_file(output_abs.path_join("control_metrics.csv"))
 	_remove_file(output_abs.path_join("manifest.json"))
 
@@ -84,12 +98,12 @@ func _init() -> void:
 		_display_size = Vector2i(first_image.get_width(), first_image.get_height())
 		_analysis_size = _analysis_size_for_display(_display_size) if _game_budget_enabled else _display_size
 
-	var manifest := _export_frames(frame_paths, raw_dir, after_dir, output_abs)
+	var manifest := _export_frames(frame_paths, raw_dir, after_dir, visible_after_dir if _save_visible_after_output else "", output_abs)
 	_write_json(output_abs.path_join("manifest.json"), manifest)
 	print(JSON.stringify(manifest, "\t"))
 	quit(1 if _failed else 0)
 
-func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
+func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, visible_after_dir: String, output_abs: String) -> Dictionary:
 	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
 	if _max_seconds > 0.0:
 		duration = min(duration, _max_seconds)
@@ -97,19 +111,26 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	if _max_frames > 0:
 		output_frames = mini(output_frames, _max_frames)
 
-	var pipeline = FramePipelineClass.new()
-	var raw_gpu = GpuAnalyzerClass.new()
-	var solver_after_gpu = GpuAnalyzerClass.new()
-	var analyzer = RuntimeAnalyzerClass.new()
-	var solver_after_analyzer = RuntimeAnalyzerClass.new()
-	var current_frame_solver = CurrentFrameSolverClass.new()
+	var pipeline = _make_frame_pipeline()
+	var raw_gpu = _make_gpu_analyzer()
+	var solver_after_gpu = _make_gpu_analyzer()
+	var analyzer = _make_analyzer()
+	var solver_after_analyzer = _make_analyzer()
+	var current_frame_solver = _make_current_frame_solver()
+	if pipeline == null or raw_gpu == null or solver_after_gpu == null or analyzer == null or solver_after_analyzer == null or current_frame_solver == null:
+		_failed = true
+		return {}
 	current_frame_solver.enabled = _current_frame_solver_enabled
 	if _object_has_property(current_frame_solver, "analytic_enabled"):
 		current_frame_solver.analytic_enabled = _analytic_solver_enabled
+	if _solver_bisection_steps >= 0 and _object_has_property(current_frame_solver, "bisection_steps"):
+		current_frame_solver.bisection_steps = _solver_bisection_steps
 	if _object_has_property(current_frame_solver, "game_budget_enabled"):
 		current_frame_solver.game_budget_enabled = _game_budget_enabled
+	if _object_has_property(current_frame_solver, "game_budget_projection_mode"):
+		current_frame_solver.game_budget_projection_mode = _game_budget_projection_mode
 	if _object_has_property(current_frame_solver, "fast_identity_enabled"):
-		current_frame_solver.fast_identity_enabled = _game_budget_enabled
+		current_frame_solver.fast_identity_enabled = _game_budget_enabled if _solver_fast_identity < 0 else _solver_fast_identity > 0
 	analyzer.headroom_margin = DEFAULT_TARGET_RISK
 	analyzer.local_correction_enabled = true
 	analyzer.mitigation_mode = _mitigation_mode
@@ -179,21 +200,21 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			if not frame_changed:
 				var held_raw_frame_path := raw_dir.path_join("frame_%06d.png" % [out_index + 1])
 				var held_after_frame_path := after_dir.path_join("frame_%06d.png" % [out_index + 1])
+				var held_visible_after_frame_path := visible_after_dir.path_join("frame_%06d.png" % [out_index + 1]) if _save_visible_after_output else ""
 				var held_source: Image = _read_texture_image(pipeline.source_texture)
-				var held_after: Image = _read_texture_image(pipeline.after_texture)
+				var held_clean_after: Image = _read_texture_image(_after_output_texture(pipeline))
 				if held_source != null:
 					_save_png(held_source, held_raw_frame_path)
-				if held_after != null:
-					_save_png(held_after, held_after_frame_path)
-				if not last_runtime_metrics.is_empty() and held_after != null:
+				if not last_runtime_metrics.is_empty() and held_clean_after != null:
 					var held_metrics := last_runtime_metrics.duplicate(true)
+					held_metrics["time"] = time_seconds
 					var held_after_metrics: Dictionary
 					if _should_measure_game_budget_after(out_index, last_after_sample_frame, last_measured_after, held_metrics):
 						held_after_metrics = _measure_visible_after_frame(
 							solver_after_gpu,
 							solver_after_analyzer,
-							pipeline.after_texture,
-							held_after,
+							_after_measurement_texture(pipeline),
+							held_clean_after,
 							analysis_delta,
 							time_seconds,
 							_after_spatial_override_enabled
@@ -209,8 +230,12 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 					max_after_spatial = max(max_after_spatial, float(held_after_metrics.get("spatial", 0.0)))
 					if float(held_after_metrics.get("raw_risk", 0.0)) > DEFAULT_TARGET_RISK:
 						after_over_target_frames += 1
+					_apply_after_output_metrics(held_metrics, held_after_metrics)
+					_refresh_visible_after_overlay(pipeline, last_shader_parameters, held_metrics)
 					raw_csv.store_line(_metrics_csv_row(out_index + 1, time_seconds, held_metrics))
 					control_csv.store_line(_control_csv_row(out_index + 1, time_seconds, sequence_index + 1, held_metrics, held_after_metrics, analyzer.mitigation_strength, last_shader_parameters))
+				if held_clean_after != null:
+					_save_after_outputs(pipeline, held_clean_after, held_after_frame_path, held_visible_after_frame_path)
 				continue
 			source_index = sequence_index
 			analysis_delta = max(pending_analysis_delta, analysis_delta)
@@ -231,22 +256,21 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			held_runtime_metrics["metric_backend"] = "gpu-game-budget-raw-held"
 			var held_shader_parameters := last_shader_parameters.duplicate(true)
 			pipeline.apply_mitigation(held_shader_parameters)
-			var held_output_image: Image = _read_texture_image(pipeline.after_texture)
-			if held_output_image == null:
+			var held_clean_output_image: Image = _read_texture_image(_after_output_texture(pipeline))
+			if held_clean_output_image == null:
 				_failed = true
 				continue
 			var held_raw_path := raw_dir.path_join("frame_%06d.png" % [out_index + 1])
 			var held_after_path := after_dir.path_join("frame_%06d.png" % [out_index + 1])
+			var held_visible_after_path := visible_after_dir.path_join("frame_%06d.png" % [out_index + 1]) if _save_visible_after_output else ""
 			_save_png(_read_texture_image(pipeline.source_texture), held_raw_path)
-			if not _save_png(held_output_image, held_after_path):
-				continue
 			var held_measured_after: Dictionary
 			if _should_measure_game_budget_after(out_index, last_after_sample_frame, last_measured_after, held_runtime_metrics):
 				held_measured_after = _measure_visible_after_frame(
 					solver_after_gpu,
 					solver_after_analyzer,
-					pipeline.after_texture,
-					held_output_image,
+					_after_measurement_texture(pipeline),
+					held_clean_output_image,
 					1.0 / _output_fps,
 					time_seconds,
 					_after_spatial_override_enabled
@@ -262,6 +286,10 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			max_after_spatial = max(max_after_spatial, float(held_measured_after.get("spatial", 0.0)))
 			if float(held_measured_after.get("raw_risk", 0.0)) > DEFAULT_TARGET_RISK:
 				after_over_target_frames += 1
+			_apply_after_output_metrics(held_runtime_metrics, held_measured_after)
+			_refresh_visible_after_overlay(pipeline, held_shader_parameters, held_runtime_metrics)
+			if not _save_after_outputs(pipeline, held_clean_output_image, held_after_path, held_visible_after_path):
+				continue
 			raw_csv.store_line(_metrics_csv_row(out_index + 1, time_seconds, held_runtime_metrics))
 			control_csv.store_line(_control_csv_row(out_index + 1, time_seconds, source_index + 1, held_runtime_metrics, held_measured_after, analyzer.mitigation_strength, held_shader_parameters))
 			last_runtime_metrics = held_runtime_metrics.duplicate(true)
@@ -270,7 +298,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 
 		var raw_gpu_metrics: Dictionary = _analyze_raw_texture(raw_gpu, pipeline.analysis_source_texture, time_seconds)
 		raw_gpu_metrics["source_kind"] = "frame_sequence"
-		if _raw_spatial_override_enabled:
+		if _raw_spatial_override_enabled and analyzer.has_method("apply_spatial_image_override"):
 			analyzer.apply_spatial_image_override(raw_gpu_metrics, source_image)
 		var runtime_metrics: Dictionary = analyzer.update_from_metrics(raw_gpu_metrics, analysis_delta, time_seconds)
 		analyzed_frames += 1
@@ -292,24 +320,84 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		shader_parameters = solver_result.get("parameters", shader_parameters)
 		_apply_current_frame_solver_metrics(runtime_metrics, solver_result)
 		analyzer.apply_current_frame_shader_solution(shader_parameters, runtime_metrics)
+		var debug_preview_analysis_image: Image = null
+		var debug_preview_metrics: Dictionary = {}
+		var debug_gpu_state: Dictionary = {}
+		var debug_after_state: Dictionary = {}
+		if _debug_preview_frame == out_index + 1 and pipeline.has_method("preview_mitigation"):
+			if solver_after_gpu.has_method("capture_runtime_state"):
+				debug_gpu_state = solver_after_gpu.capture_runtime_state()
+			if solver_after_analyzer.has_method("capture_runtime_state"):
+				debug_after_state = solver_after_analyzer.capture_runtime_state()
+			if pipeline.preview_mitigation(shader_parameters):
+				var preview_texture = pipeline.preview_analysis_after_texture if pipeline.preview_analysis_after_texture != null else pipeline.preview_after_texture
+				debug_preview_analysis_image = _read_texture_image(preview_texture)
+				if debug_preview_analysis_image != null:
+					debug_preview_metrics = _measure_visible_after_frame(
+						solver_after_gpu,
+						solver_after_analyzer,
+						preview_texture,
+						debug_preview_analysis_image,
+						1.0 / _output_fps,
+						time_seconds,
+						_after_spatial_override_enabled
+					)
+			_restore_debug_analyzer_state(solver_after_gpu, debug_gpu_state)
+			_restore_debug_analyzer_state(solver_after_analyzer, debug_after_state)
 		pipeline.apply_mitigation(shader_parameters)
+		if _debug_preview_frame == out_index + 1:
+			var apply_analysis_image: Image = _read_texture_image(pipeline.analysis_after_texture)
+			var apply_analysis_metrics: Dictionary = {}
+			if apply_analysis_image != null:
+				if solver_after_gpu.has_method("capture_runtime_state"):
+					debug_gpu_state = solver_after_gpu.capture_runtime_state()
+				if solver_after_analyzer.has_method("capture_runtime_state"):
+					debug_after_state = solver_after_analyzer.capture_runtime_state()
+				apply_analysis_metrics = _measure_visible_after_frame(
+					solver_after_gpu,
+					solver_after_analyzer,
+					pipeline.analysis_after_texture,
+					apply_analysis_image,
+					1.0 / _output_fps,
+					time_seconds,
+					_after_spatial_override_enabled
+				)
+				_restore_debug_analyzer_state(solver_after_gpu, debug_gpu_state)
+				_restore_debug_analyzer_state(solver_after_analyzer, debug_after_state)
+			var diff_summary := _image_diff_summary(debug_preview_analysis_image, apply_analysis_image)
+			print("[preview-apply-debug] frame=%d preview_risk=%.6f apply_risk=%.6f solver_risk=%.6f diff_pixels=%d max_channel_delta=%d mean_channel_delta=%.6f params=%s" % [
+				out_index + 1,
+				float(debug_preview_metrics.get("raw_risk", -1.0)),
+				float(apply_analysis_metrics.get("raw_risk", -1.0)),
+				float(runtime_metrics.get("solver_after_risk", -1.0)),
+				int(diff_summary.get("diff_pixels", -1)),
+				int(diff_summary.get("max_channel_delta", -1)),
+				float(diff_summary.get("mean_channel_delta", -1.0)),
+				JSON.stringify({
+					"mitigation_strength": shader_parameters.get("mitigation_strength", null),
+					"mitigation_enabled_signal": shader_parameters.get("mitigation_enabled_signal", null),
+					"correction_mix_alpha": shader_parameters.get("correction_mix_alpha", null),
+					"temporal_projection_strength": shader_parameters.get("temporal_projection_strength", null),
+					"luminance_delta_limit": shader_parameters.get("luminance_delta_limit", null),
+					"solver_correction_scale": shader_parameters.get("solver_correction_scale", null),
+				})
+			])
 
-		var after_output_image: Image = _read_texture_image(pipeline.after_texture)
-		if after_output_image == null:
+		var clean_after_output_image: Image = _read_texture_image(_after_output_texture(pipeline))
+		if clean_after_output_image == null:
 			_failed = true
 			continue
 		var raw_frame_path := raw_dir.path_join("frame_%06d.png" % [out_index + 1])
 		var after_frame_path := after_dir.path_join("frame_%06d.png" % [out_index + 1])
+		var visible_after_frame_path := visible_after_dir.path_join("frame_%06d.png" % [out_index + 1]) if _save_visible_after_output else ""
 		_save_png(_read_texture_image(pipeline.source_texture), raw_frame_path)
-		if not _save_png(after_output_image, after_frame_path):
-			continue
 		var measured_after: Dictionary
 		if _should_measure_game_budget_after(out_index, last_after_sample_frame, last_measured_after, runtime_metrics):
 			measured_after = _measure_visible_after_frame(
 				solver_after_gpu,
 				solver_after_analyzer,
-				pipeline.after_texture,
-				after_output_image,
+				_after_measurement_texture(pipeline),
+				clean_after_output_image,
 				1.0 / _output_fps,
 				time_seconds,
 				_after_spatial_override_enabled
@@ -328,6 +416,10 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		if float(measured_after.get("raw_risk", 0.0)) > DEFAULT_TARGET_RISK:
 			after_over_target_frames += 1
 
+		_apply_after_output_metrics(runtime_metrics, measured_after)
+		_refresh_visible_after_overlay(pipeline, shader_parameters, runtime_metrics)
+		if not _save_after_outputs(pipeline, clean_after_output_image, after_frame_path, visible_after_frame_path):
+			continue
 		raw_csv.store_line(_metrics_csv_row(out_index + 1, time_seconds, runtime_metrics))
 		control_csv.store_line(_control_csv_row(out_index + 1, time_seconds, source_index + 1, runtime_metrics, measured_after, analyzer.mitigation_strength, shader_parameters))
 		last_runtime_metrics = runtime_metrics.duplicate(true)
@@ -346,6 +438,13 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 	solver_after_gpu.dispose()
 	pipeline.dispose()
 
+	var cases := [
+		_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
+		_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
+	]
+	if _save_visible_after_output and not visible_after_dir.is_empty():
+		cases.append(_case_manifest("pokemon_shock_visible_after", "pokemon_private_visible_after", visible_after_dir, "", output_frames, false))
+
 	return {
 		"schema": "quell-mitigated-frame-export-v1",
 		"measurement_backend": "saved-after-frame-sequence-detection-input",
@@ -355,6 +454,9 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		"game_budget_skip_raw_risk": _game_budget_skip_raw_risk,
 		"game_budget_policy": _game_budget_policy,
 		"game_budget_policy_label": _game_budget_policy_label(),
+		"game_budget_projection_mode": _game_budget_projection_mode,
+		"game_budget_projection_label": _game_budget_projection_label(),
+		"runtime_backend": "native" if _native_enabled else "gdscript",
 		"spatial_sensitivity": int(analyzer.spatial_sensitivity),
 		"mitigation_mode": _mitigation_mode,
 		"temporal_blend_alpha": _temporal_blend_alpha,
@@ -376,6 +478,8 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 		"raw_spatial_override_enabled": _raw_spatial_override_enabled,
 		"after_spatial_override_enabled": _after_spatial_override_enabled,
 		"solver_preview_spatial_readback_enabled": _solver_preview_spatial_readback_enabled,
+		"solver_bisection_steps": _solver_bisection_steps,
+		"visible_after_output_saved": _save_visible_after_output,
 		"summary": {
 			"max_raw_risk": snapped(max_raw_risk, 0.001),
 			"max_after_risk": snapped(max_after_risk, 0.001),
@@ -385,10 +489,7 @@ func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: 
 			"max_after_red": snapped(max_after_red, 0.001),
 			"max_after_spatial": snapped(max_after_spatial, 0.001),
 		},
-		"cases": [
-			_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
-			_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
-		],
+		"cases": cases,
 		"control_metrics_csv": control_csv_path,
 		"output_root": output_abs,
 	}
@@ -437,6 +538,14 @@ func _parse_args() -> void:
 			_game_budget_enabled = true
 			_current_frame_solver_enabled = true
 			_game_budget_policy = RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
+		elif arg == "--game-budget-legacy" or arg == "--quell-game-budget-legacy" or arg == "--game-budget-old" or arg == "--quell-game-budget-old":
+			_game_budget_enabled = true
+			_current_frame_solver_enabled = true
+			_game_budget_projection_mode = GAME_BUDGET_PROJECTION_LEGACY
+		elif arg == "--game-budget-closed-form" or arg == "--quell-game-budget-closed-form" or arg == "--game-budget-projection-closed-form" or arg == "--quell-game-budget-projection-closed-form":
+			_game_budget_enabled = true
+			_current_frame_solver_enabled = true
+			_game_budget_projection_mode = GAME_BUDGET_PROJECTION_CLOSED_FORM
 		elif arg == "--game-budget-skip-raw-risk" or arg == "--quell-game-budget-skip-raw-risk" or arg == "--game-budget-control-only" or arg == "--quell-game-budget-control-only":
 			_game_budget_enabled = true
 			_game_budget_skip_raw_risk = true
@@ -445,6 +554,10 @@ func _parse_args() -> void:
 			_game_budget_enabled = true
 			_current_frame_solver_enabled = true
 			_game_budget_policy = _parse_game_budget_policy(arg.get_slice("=", 1))
+		elif arg.begins_with("--game-budget-projection=") or arg.begins_with("--quell-game-budget-projection=") or arg.begins_with("--game-budget-solver=") or arg.begins_with("--quell-game-budget-solver="):
+			_game_budget_enabled = true
+			_current_frame_solver_enabled = true
+			_game_budget_projection_mode = _parse_game_budget_projection_mode(arg.get_slice("=", 1))
 		elif arg == "--demo-runtime":
 			_output_fps = 60.0
 			_live_cadence = true
@@ -466,6 +579,20 @@ func _parse_args() -> void:
 			_max_seconds = max(0.0, float(arg.trim_prefix("--max-seconds=")))
 		elif arg.begins_with("--max-frames="):
 			_max_frames = maxi(0, int(arg.trim_prefix("--max-frames=")))
+		elif arg == "--native":
+			_native_enabled = true
+		elif arg == "--no-native":
+			_native_enabled = false
+		elif arg == "--save-visible-after" or arg == "--visible-after-output" or arg == "--record-visible-output":
+			_save_visible_after_output = true
+		elif arg == "--solver-fast-identity":
+			_solver_fast_identity = 1
+		elif arg == "--no-solver-fast-identity":
+			_solver_fast_identity = 0
+		elif arg.begins_with("--solver-bisection=") or arg.begins_with("--solver-bisection-steps="):
+			_solver_bisection_steps = maxi(0, int(arg.get_slice("=", 1)))
+		elif arg.begins_with("--debug-preview-frame="):
+			_debug_preview_frame = maxi(1, int(arg.get_slice("=", 1)))
 		index += 1
 
 func _argument_value(arg: String, prefix: String, args: PackedStringArray, index: int) -> String:
@@ -480,16 +607,59 @@ func _object_has_property(object: Object, property_name: String) -> bool:
 			return true
 	return false
 
+func _make_analyzer():
+	if _native_enabled:
+		var analyzer = NativeBridgeClass.instantiate_native_analyzer()
+		if analyzer == null:
+			push_error("QuellNativeAnalyzer is unavailable")
+		return analyzer
+	return RuntimeAnalyzerClass.new()
+
+func _make_gpu_analyzer():
+	if _native_enabled:
+		var analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
+		if analyzer == null:
+			push_error("QuellNativeGpuAnalyzer is unavailable")
+		return analyzer
+	return GpuAnalyzerClass.new()
+
+func _make_frame_pipeline():
+	if _native_enabled:
+		var pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
+		if pipeline == null:
+			push_error("QuellNativeGpuFramePipeline is unavailable")
+		return pipeline
+	return FramePipelineClass.new()
+
+func _make_current_frame_solver():
+	if _native_enabled:
+		var solver = NativeBridgeClass.instantiate_native_current_frame_solver()
+		if solver == null:
+			push_error("QuellNativeCurrentFrameSolver is unavailable")
+		return solver
+	return CurrentFrameSolverClass.new()
+
 func _parse_game_budget_policy(value: String) -> int:
 	var normalized := value.to_lower()
 	if normalized == "atf" or normalized == "adaptive" or normalized == "adaptive_temporal_filter":
 		return RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER
 	return RuntimeAnalyzerClass.GameBudgetPolicy.DIRECT_BRIGHTNESS
 
+func _parse_game_budget_projection_mode(value: String) -> int:
+	var normalized := value.to_lower().replace("-", "_")
+	if normalized == "legacy" or normalized == "old" or normalized == "previous":
+		return GAME_BUDGET_PROJECTION_LEGACY
+	return GAME_BUDGET_PROJECTION_CLOSED_FORM
+
 func _game_budget_policy_label() -> String:
 	if _game_budget_policy == RuntimeAnalyzerClass.GameBudgetPolicy.ADAPTIVE_TEMPORAL_FILTER:
 		return "atf"
 	return "direct"
+
+func _game_budget_projection_label() -> String:
+	if _game_budget_projection_mode == GAME_BUDGET_PROJECTION_LEGACY:
+		return "legacy"
+	return "closed-form"
 
 func _globalize_path(path: String) -> String:
 	if path.begins_with("res://"):
@@ -580,6 +750,63 @@ func _read_texture_image(texture: Texture2DRD) -> Image:
 		return null
 	return Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBA8, bytes)
 
+func _after_output_texture(pipeline) -> Texture2DRD:
+	if _object_has_property(pipeline, "mitigated_after_texture"):
+		var texture = pipeline.mitigated_after_texture
+		if texture != null:
+			return texture
+	return pipeline.after_texture
+
+func _after_measurement_texture(pipeline) -> Texture2DRD:
+	if pipeline != null and pipeline.analysis_after_texture != null:
+		return pipeline.analysis_after_texture
+	return _after_output_texture(pipeline)
+
+func _visible_after_texture(pipeline) -> Texture2DRD:
+	if pipeline != null and _object_has_property(pipeline, "after_texture"):
+		var texture = pipeline.after_texture
+		if texture != null:
+			return texture
+	return _after_output_texture(pipeline)
+
+func _visible_after_risk_for_metrics(metrics: Dictionary, after_metrics: Dictionary) -> float:
+	var measured_risk: float = float(after_metrics.get("raw_risk", 0.0))
+	if _game_budget_enabled and bool(after_metrics.get("measurement_skipped", false)):
+		measured_risk = float(after_metrics.get("estimated_raw_risk", measured_risk))
+	if _game_budget_enabled and metrics.has("solver_after_risk"):
+		return min(measured_risk, float(metrics.get("solver_after_risk", measured_risk)))
+	return measured_risk
+
+func _apply_after_output_metrics(metrics: Dictionary, after_metrics: Dictionary) -> void:
+	var raw_risk: float = float(metrics.get("raw_risk", 0.0))
+	var output_risk: float = _visible_after_risk_for_metrics(metrics, after_metrics)
+	var risk_reduction: float = max(0.0, raw_risk - output_risk)
+	metrics["output_risk"] = output_risk
+	metrics["risk_reduction"] = risk_reduction
+	metrics["reduction_ratio"] = risk_reduction / max(raw_risk, 0.001)
+
+func _apply_overlay_metrics_to_shader_parameters(parameters: Dictionary, metrics: Dictionary, output_risk: float) -> void:
+	parameters["raw_risk_for_overlay"] = clamp(float(metrics.get("raw_risk", 0.0)), 0.0, 1.50)
+	parameters["output_risk_for_overlay"] = clamp(output_risk, 0.0, 1.50)
+	parameters["target_risk_for_overlay"] = DEFAULT_TARGET_RISK
+	parameters["time_for_overlay"] = float(metrics.get("time", 0.0))
+
+func _refresh_visible_after_overlay(pipeline, shader_parameters: Dictionary, metrics: Dictionary) -> void:
+	if pipeline == null or shader_parameters.is_empty():
+		return
+	var output_risk: float = float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
+	_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, output_risk)
+	if pipeline.has_method("refresh_developer_alpha_overlay"):
+		pipeline.refresh_developer_alpha_overlay(shader_parameters)
+
+func _save_after_outputs(pipeline, clean_after_image: Image, clean_after_path: String, visible_after_path: String) -> bool:
+	if not _save_png(clean_after_image, clean_after_path):
+		return false
+	if visible_after_path.is_empty():
+		return true
+	var visible_after_image: Image = _read_texture_image(_visible_after_texture(pipeline))
+	return _save_png(visible_after_image, visible_after_path)
+
 func _configure_after_measurement_analyzer(after_analyzer) -> void:
 	after_analyzer.mitigation_enabled = false
 	after_analyzer.local_correction_enabled = true
@@ -620,15 +847,56 @@ func _measure_visible_after_frame(
 	var after_gpu_metrics: Dictionary = after_gpu.analyze_texture(after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after-visible"
 	after_gpu_metrics["source_kind"] = "frame_sequence"
-	if use_spatial_override and after_image != null:
+	if use_spatial_override and after_image != null and after_analyzer.has_method("apply_spatial_image_override"):
 		after_analyzer.apply_spatial_image_override(after_gpu_metrics, after_image)
 	return after_analyzer.update_from_metrics(after_gpu_metrics, delta, time_seconds)
 
+func _restore_debug_analyzer_state(analyzer, state: Dictionary) -> void:
+	if analyzer != null and not state.is_empty() and analyzer.has_method("restore_runtime_state"):
+		analyzer.restore_runtime_state(state)
+
+func _image_diff_summary(a: Image, b: Image) -> Dictionary:
+	if a == null or b == null or a.is_empty() or b.is_empty():
+		return {"diff_pixels": -1, "max_channel_delta": -1, "mean_channel_delta": -1.0}
+	if a.get_width() != b.get_width() or a.get_height() != b.get_height():
+		return {"diff_pixels": -1, "max_channel_delta": -1, "mean_channel_delta": -1.0}
+	if a.get_format() != Image.FORMAT_RGBA8:
+		a = a.duplicate()
+		a.convert(Image.FORMAT_RGBA8)
+	if b.get_format() != Image.FORMAT_RGBA8:
+		b = b.duplicate()
+		b.convert(Image.FORMAT_RGBA8)
+	var ad := a.get_data()
+	var bd := b.get_data()
+	if ad.size() != bd.size():
+		return {"diff_pixels": -1, "max_channel_delta": -1, "mean_channel_delta": -1.0}
+	var diff_pixels := 0
+	var max_delta := 0
+	var total_delta := 0
+	for i in range(0, ad.size(), 4):
+		var pixel_diff := false
+		for c in range(4):
+			var delta := absi(int(ad[i + c]) - int(bd[i + c]))
+			if delta > 0:
+				pixel_diff = true
+				total_delta += delta
+				max_delta = maxi(max_delta, delta)
+		if pixel_diff:
+			diff_pixels += 1
+	return {
+		"diff_pixels": diff_pixels,
+		"max_channel_delta": max_delta,
+		"mean_channel_delta": float(total_delta) / float(maxi(1, ad.size())),
+	}
+
 func _measure_saved_after_sequence(after_dir: String, after_csv_path: String) -> Dictionary:
 	var frame_paths := _frame_paths(after_dir)
-	var pipeline = FramePipelineClass.new()
-	var after_gpu = GpuAnalyzerClass.new()
-	var after_analyzer = RuntimeAnalyzerClass.new()
+	var pipeline = _make_frame_pipeline()
+	var after_gpu = _make_gpu_analyzer()
+	var after_analyzer = _make_analyzer()
+	if pipeline == null or after_gpu == null or after_analyzer == null:
+		_failed = true
+		return {}
 	_configure_after_measurement_analyzer(after_analyzer)
 
 	if not pipeline.configure(_display_size, _analysis_size):
@@ -789,8 +1057,19 @@ func _control_csv_row(frame: int, time_seconds: float, source_frame: int, raw_me
 		visible_after_risk,
 		float(raw_metrics.get("control_risk", 0.0)),
 		float(raw_metrics.get("raw_source_control_risk", 0.0)),
+		float(raw_metrics.get("current_raw_detector_risk", 0.0)),
+		float(raw_metrics.get("output_risk", raw_metrics.get("solver_after_risk", 0.0))),
+		float(raw_metrics.get("previous_after_risk", raw_metrics.get("last_after_risk", -1.0))),
 		float(raw_metrics.get("temporal_raw_after_activity", 0.0)),
 		float(raw_metrics.get("temporal_after_pressure", 0.0)),
+		float(raw_metrics.get("current_frame_after_budget_guard_activity", 0.0)),
+		float(raw_metrics.get("temporal_source_activity", 0.0)),
+		float(raw_metrics.get("temporal_after_activity", 0.0)),
+		float(raw_metrics.get("temporal_after_feedback_activity", 0.0)),
+		float(raw_metrics.get("red_current_area", raw_metrics.get("red_saturation_area", 0.0))),
+		float(raw_metrics.get("current_high_luminance_area", 0.0)),
+		float(raw_metrics.get("frame_luminance_contrast", raw_metrics.get("luminance_contrast", 0.0))),
+		float(raw_metrics.get("temporal_luminance_contrast", 0.0)),
 		analyzer_strength,
 		float(shader_parameters.get("mitigation_strength", 0.0)),
 		int(shader_parameters.get("mitigation_mode", 0)),

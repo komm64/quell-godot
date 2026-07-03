@@ -2,6 +2,8 @@
 
 Godot binding and demo project for Quell.
 
+Current developer-alpha package version: `0.2.0-developer-alpha`.
+
 This repository contains the public Godot demo wrapper:
 
 - `QuellRuntime` is provided by the synced native GDExtension.
@@ -35,21 +37,14 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 - reduced Raw and After analysis textures
 - Raw risk from the generated source texture
 - measured After risk from re-analyzing the corrected texture
-- configurable viewing distance and After target
-- selectable correction mode:
-  - Current frame only: adjusts the displayed frame without sampling the
-    previous output frame.
-  - Temporal blend: mixes against the previous corrected frame to limit
-    frame-to-frame luminance changes.
-- Developer Alpha demo launches in game-budget mode by default. Use
-  `--quell-full-quality` or `--quell-no-game-budget` to run the heavier
-  validation-oriented path.
+- fixed developer-alpha runtime preset
 - Developer Alpha demo suppresses the debug menu and F1 toggle by default. Use
   `--quell-debug-menu` to enable the debug panel and F1 toggle for local
   development.
-- `QuellRuntime.enabled` disables Quell analysis and correction as a whole.
-  `mitigation_enabled` keeps analysis running and only bypasses correction, so
-  Raw/After comparison remains available.
+- `QuellRuntime.enabled` is the public runtime control. Other analyzer,
+  feedback, sampling, solver, and mitigation-policy settings are internal
+  runtime preset details. Version `0.2.0-developer-alpha` intentionally
+  simplifies the public interface around this enabled-only control.
 - HUD graph for Raw, After, and mitigation strength
 - `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
   actual scene color buffer and applies mitigation before display.
@@ -58,10 +53,11 @@ private core installed, it runs the GPU `RenderingDevice` demo:
 
 Copy the developer-alpha package contents into a Godot project and open the
 project once in the Godot editor so the `.gdextension` is indexed. The public
-node-facing API is the native `QuellRuntime` class. The analyzer, feedback
-controller, solver, GPU metric reducer, mitigation compute shaders, and
-required developer-alpha logo/URL/Risk overlay are implementation details
-supplied by the native core addon.
+node-facing API is the native `QuellRuntime` class. Set `enabled` to turn Quell
+on or off; the analyzer, feedback controller, solver, sampling cadence, GPU
+metric reducer, mitigation compute shaders, and required developer-alpha
+logo/URL/Risk overlay are implementation details supplied by the native core
+addon.
 
 Developer-alpha packages are experimental developer evaluation builds. They are
 not medical devices, diagnostic tools, prevention or treatment tools,
