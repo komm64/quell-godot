@@ -5,6 +5,8 @@ const GpuAnalyzerClass = preload("res://addons/quell_core/runtime/quell_gpu_anal
 const FramePipelineClass = preload("res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd")
 const CurrentFrameSolverClass = preload("res://addons/quell_core/runtime/quell_current_frame_solver.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
+const ProjectionReferenceClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
+const SpatialReferenceClass = preload("res://addons/quell_core/runtime/quell_spatial_reference.gd")
 
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
 const CONTROL_CSV_HEADER := "Frame,TimeSeconds,SourceFrame,RawRisk,AfterRisk,ControlRisk,RawSourceControlRisk,CurrentRawDetectorRisk,OutputRisk,PreviousAfterRisk,TemporalRawAfterActivity,TemporalAfterPressure,CurrentFrameAfterBudgetGuardActivity,TemporalSourceActivity,TemporalAfterActivity,TemporalAfterFeedbackActivity,RedCurrentArea,CurrentHighLuminanceArea,FrameLuminanceContrast,TemporalLuminanceContrast,AnalyzerStrength,ShaderStrength,MitigationMode,RedSuppression,ContrastReduction,BlurStrength,LuminanceDeltaLimit,ContrastScaleLimit,SpatialContrastLimit,TemporalBlendAlpha,MitigationEnabledSignal,CorrectionMixAlpha,TemporalProjectionStrength,SolverCorrectionScale,SolverIdentityAfterRisk,SolverAfterRisk,EffectiveBrightness,EffectiveContrast,EffectiveFeedback,RawGeneralFlashCount,AfterGeneralFlashCount,RawRedFlashCount,AfterRedFlashCount,RawGeneralFlashArea,AfterGeneralFlashArea,RawRedFlashArea,AfterRedFlashArea,GameBudgetControlRisk,GameBudgetRawAfterActivity,GameBudgetHighAreaPressure,GameBudgetOutputHistoryPressure,GameBudgetLuminanceEventPressure,GameBudgetAfterHistoryHold,GameBudgetAfterHistoryPressure,GameBudgetBurstHold,GameBudgetFlashImpulse,GameBudgetFlashDebt,GameBudgetFlashDebtState,GameBudgetTargetPressure,GameBudgetReleaseSlowdown,GameBudgetReleaseRate"
@@ -46,6 +48,10 @@ var _live_cadence := false
 var _max_seconds := 0.0
 var _max_frames := 0
 var _native_enabled := false
+var _hard_projection_enabled := false
+var _oracle_projection_enabled := false
+# Oracle mitigation style: "risecap" (sharp/dark, default) or "lowpass" (bright glow).
+var _mitigation_style := "risecap"
 var _save_visible_after_output := false
 var _solver_bisection_steps := -1
 var _debug_preview_frame := -1
@@ -103,7 +109,186 @@ func _init() -> void:
 	print(JSON.stringify(manifest, "\t"))
 	quit(1 if _failed else 0)
 
+func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
+	# Validates the verified GDScript projection oracle (QuellProjectionReference)
+	# end-to-end against the REAL analyzer. Mitigation runs on CPU at analysis
+	# resolution; saved frames are re-measured by the same analyzer the gate uses.
+	# Not a realtime path — this proves the algorithm before the GPU/native port.
+	_display_size = _analysis_size
+	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
+	if _max_seconds > 0.0:
+		duration = min(duration, _max_seconds)
+	var output_frames := maxi(1, int(floor(duration * _output_fps)))
+	if _max_frames > 0:
+		output_frames = mini(output_frames, _max_frames)
+
+	var projection = ProjectionReferenceClass.new()
+	projection.target_risk = DEFAULT_TARGET_RISK
+	projection.mitigation_style = ProjectionReferenceClass.STYLE_TEMPORAL_LOWPASS if _mitigation_style == "lowpass" else ProjectionReferenceClass.STYLE_RISE_CAP
+	projection.reset()
+	for out_index in range(output_frames):
+		var time_seconds := float(out_index) / _output_fps
+		var source_index := clampi(int(floor(time_seconds * _source_fps)), 0, frame_paths.size() - 1)
+		var source_image: Image = _load_image(String(frame_paths[source_index]))
+		if source_image == null:
+			_failed = true
+			continue
+		var analysis_source := _prepare_analysis_image(source_image, _analysis_size)
+		var projected: Image = projection.step(analysis_source, time_seconds)
+		_save_png(analysis_source, raw_dir.path_join("frame_%06d.png" % [out_index + 1]))
+		_save_png(projected, after_dir.path_join("frame_%06d.png" % [out_index + 1]))
+
+	var raw_csv_path := raw_dir.path_join("quell_metrics.csv")
+	var after_csv_path := after_dir.path_join("quell_metrics.csv")
+	var raw_stats: Dictionary = _measure_saved_after_sequence(raw_dir, raw_csv_path)
+	var after_stats: Dictionary = _measure_saved_after_sequence(after_dir, after_csv_path)
+
+	var cases := [
+		_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
+		_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
+	]
+	var max_after_risk := float(after_stats.get("max_after_risk", 0.0))
+	return {
+		"schema": "quell-mitigated-frame-export-v1",
+		"mitigation_algorithm": "hard-constrained-projection-oracle",
+		"mitigation_style": _mitigation_style,
+		"measurement_backend": "saved-after-frame-sequence-detection-input",
+		"runtime_backend": "native" if _native_enabled else "gdscript",
+		"game_budget_enabled": false,
+		"mitigation_mode": 3,
+		"fps": int(round(_output_fps)),
+		"source_fps": _source_fps,
+		"input_dir": _input_dir,
+		"output_dir": _output_dir,
+		"target": DEFAULT_TARGET_RISK,
+		"dangerous_area_fraction": 0.25,
+		"display_width": _display_size.x,
+		"display_height": _display_size.y,
+		"analysis_width": _analysis_size.x,
+		"analysis_height": _analysis_size.y,
+		"source_frames": frame_paths.size(),
+		"output_frames": output_frames,
+		"summary": {
+			"max_raw_risk": snapped(float(raw_stats.get("max_after_risk", 0.0)), 0.001),
+			"max_after_risk": snapped(max_after_risk, 0.001),
+			"after_target_passed": max_after_risk <= DEFAULT_TARGET_RISK + 0.005,
+			"after_over_target_frames": int(after_stats.get("after_over_target_frames", 0)),
+			"max_after_luminance": snapped(float(after_stats.get("max_after_luminance", 0.0)), 0.001),
+			"max_after_red": snapped(float(after_stats.get("max_after_red", 0.0)), 0.001),
+			"max_after_spatial": snapped(float(after_stats.get("max_after_spatial", 0.0)), 0.001),
+		},
+		"cases": cases,
+		"output_root": output_abs,
+	}
+
+func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
+	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
+	if _max_seconds > 0.0:
+		duration = min(duration, _max_seconds)
+	var output_frames := maxi(1, int(floor(duration * _output_fps)))
+	if _max_frames > 0:
+		output_frames = mini(output_frames, _max_frames)
+
+	var pipeline = _make_frame_pipeline()
+	if pipeline == null:
+		_failed = true
+		return {}
+	if not pipeline.configure(_display_size, _analysis_size):
+		push_error("Failed to configure hard-projection pipeline")
+		_failed = true
+		return {}
+	# The oracle runs as a CPU shadow at analysis resolution: it solves the
+	# per-frame event budget, tone map, and spatial scale, and the GPU pass
+	# (quell_hard_projection.glsl) applies the same solution at display
+	# resolution. Safety does not rest on the shadow being exact — the GPU
+	# finisher clamps against the GPU's own previous-after texture, and the
+	# gate re-measures the saved frames.
+	var solver = ProjectionReferenceClass.new()
+	solver.target_risk = DEFAULT_TARGET_RISK
+	solver.reset()
+
+	for out_index in range(output_frames):
+		var time_seconds := float(out_index) / _output_fps
+		var source_index := clampi(int(floor(time_seconds * _source_fps)), 0, frame_paths.size() - 1)
+		var source_image: Image = _load_image(String(frame_paths[source_index]))
+		if source_image == null:
+			_failed = true
+			continue
+		if not pipeline.upload_source_image(source_image, true):
+			push_error("Failed to upload source frame %d" % source_index)
+			_failed = true
+			continue
+		var analysis_image := _prepare_analysis_image(source_image, _analysis_size)
+		solver.step(analysis_image, time_seconds)
+		var shader_parameters := {
+			"mitigation_mode": 3,
+			"mitigation_strength": 1.0,
+			"mitigation_enabled_signal": 1.0,
+			"tone_enforced": 1.0 if bool(solver.last_solution.get("enforced", false)) else 0.0,
+			"tone_gain": float(solver.last_solution.get("tone_gain", 1.0)),
+			"tone_floor": float(solver.last_solution.get("tone_floor", 0.0)),
+			"spatial_contrast_scale": solver.last_spatial_scale,
+			"spatial_mean_luma": solver.last_spatial_mean,
+		}
+		pipeline.apply_mitigation(shader_parameters)
+		var clean_after: Image = _read_texture_image(_after_output_texture(pipeline))
+		if clean_after == null:
+			_failed = true
+			continue
+		_save_png(_read_texture_image(pipeline.source_texture), raw_dir.path_join("frame_%06d.png" % [out_index + 1]))
+		_save_png(clean_after, after_dir.path_join("frame_%06d.png" % [out_index + 1]))
+
+	pipeline.dispose()
+
+	var raw_csv_path := raw_dir.path_join("quell_metrics.csv")
+	var after_csv_path := after_dir.path_join("quell_metrics.csv")
+	var raw_stats: Dictionary = _measure_saved_after_sequence(raw_dir, raw_csv_path)
+	var after_stats: Dictionary = _measure_saved_after_sequence(after_dir, after_csv_path)
+
+	var cases := [
+		_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
+		_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
+	]
+	var max_after_risk := float(after_stats.get("max_after_risk", 0.0))
+	return {
+		"schema": "quell-mitigated-frame-export-v1",
+		"mitigation_algorithm": "hard-constrained-projection",
+		"measurement_backend": "saved-after-frame-sequence-detection-input",
+		"runtime_backend": "native" if _native_enabled else "gdscript",
+		"game_budget_enabled": false,
+		"mitigation_mode": 3,
+		"fps": int(round(_output_fps)),
+		"source_fps": _source_fps,
+		"input_dir": _input_dir,
+		"output_dir": _output_dir,
+		"target": DEFAULT_TARGET_RISK,
+		"dangerous_area_fraction": 0.25,
+		"display_width": _display_size.x,
+		"display_height": _display_size.y,
+		"analysis_width": _analysis_size.x,
+		"analysis_height": _analysis_size.y,
+		"source_frames": frame_paths.size(),
+		"output_frames": output_frames,
+		"raw_spatial_override_enabled": _raw_spatial_override_enabled,
+		"after_spatial_override_enabled": _after_spatial_override_enabled,
+		"summary": {
+			"max_raw_risk": snapped(float(raw_stats.get("max_after_risk", 0.0)), 0.001),
+			"max_after_risk": snapped(max_after_risk, 0.001),
+			"after_target_passed": max_after_risk <= DEFAULT_TARGET_RISK + 0.005,
+			"after_over_target_frames": int(after_stats.get("after_over_target_frames", 0)),
+			"max_after_luminance": snapped(float(after_stats.get("max_after_luminance", 0.0)), 0.001),
+			"max_after_red": snapped(float(after_stats.get("max_after_red", 0.0)), 0.001),
+			"max_after_spatial": snapped(float(after_stats.get("max_after_spatial", 0.0)), 0.001),
+		},
+		"cases": cases,
+		"output_root": output_abs,
+	}
+
 func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, visible_after_dir: String, output_abs: String) -> Dictionary:
+	if _oracle_projection_enabled:
+		return _export_frames_oracle_projection(frame_paths, raw_dir, after_dir, output_abs)
+	if _hard_projection_enabled:
+		return _export_frames_hard_projection(frame_paths, raw_dir, after_dir, output_abs)
 	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
 	if _max_seconds > 0.0:
 		duration = min(duration, _max_seconds)
@@ -583,6 +768,14 @@ func _parse_args() -> void:
 			_native_enabled = true
 		elif arg == "--no-native":
 			_native_enabled = false
+		elif arg == "--hard-projection" or arg == "--hard-constrained-projection":
+			_hard_projection_enabled = true
+		elif arg == "--oracle-projection":
+			_oracle_projection_enabled = true
+		elif arg == "--lowpass" or arg == "--mitigation-style=lowpass":
+			_mitigation_style = "lowpass"
+		elif arg == "--rise-cap" or arg == "--mitigation-style=risecap":
+			_mitigation_style = "risecap"
 		elif arg == "--save-visible-after" or arg == "--visible-after-output" or arg == "--record-visible-output":
 			_save_visible_after_output = true
 		elif arg == "--solver-fast-identity":
@@ -772,9 +965,7 @@ func _visible_after_texture(pipeline) -> Texture2DRD:
 func _visible_after_risk_for_metrics(metrics: Dictionary, after_metrics: Dictionary) -> float:
 	var measured_risk: float = float(after_metrics.get("raw_risk", 0.0))
 	if _game_budget_enabled and bool(after_metrics.get("measurement_skipped", false)):
-		measured_risk = float(after_metrics.get("estimated_raw_risk", measured_risk))
-	if _game_budget_enabled and metrics.has("solver_after_risk"):
-		return min(measured_risk, float(metrics.get("solver_after_risk", measured_risk)))
+		return float(after_metrics.get("estimated_raw_risk", measured_risk))
 	return measured_risk
 
 func _apply_after_output_metrics(metrics: Dictionary, after_metrics: Dictionary) -> void:
@@ -847,9 +1038,38 @@ func _measure_visible_after_frame(
 	var after_gpu_metrics: Dictionary = after_gpu.analyze_texture(after_texture, time_seconds)
 	after_gpu_metrics["source"] = "gpu-after-visible"
 	after_gpu_metrics["source_kind"] = "frame_sequence"
-	if use_spatial_override and after_image != null and after_analyzer.has_method("apply_spatial_image_override"):
-		after_analyzer.apply_spatial_image_override(after_gpu_metrics, after_image)
+	if use_spatial_override and after_image != null:
+		if after_analyzer.has_method("apply_spatial_image_override"):
+			after_analyzer.apply_spatial_image_override(after_gpu_metrics, after_image)
+		else:
+			# The native analyzer has no port of the reference spatial detector
+			# yet, so without this the score silently falls back to the runtime
+			# GPU edge heuristic (documented as unreliable in issue #1). The
+			# gate must score spatial with the reference-grade detector.
+			_apply_reference_spatial_override(after_gpu_metrics, after_image)
 	return after_analyzer.update_from_metrics(after_gpu_metrics, delta, time_seconds)
+
+var _spatial_reference_override = null
+
+# Mirrors quell_analyzer.apply_spatial_image_override using the offline
+# reference detector (quell_spatial_reference.gd) on a downscaled copy: the
+# reference's projections bin to <= 192 columns anyway, and stripe hazards at
+# the >5 light-dark-pair scale (ITU-BT1702 / EFA-2005) survive 192-wide
+# sampling, so this keeps the saved-frame re-analysis affordable.
+func _apply_reference_spatial_override(metrics: Dictionary, image: Image) -> void:
+	if _spatial_reference_override == null:
+		_spatial_reference_override = SpatialReferenceClass.new()
+	var sample := image
+	if image.get_width() > 192:
+		sample = image.duplicate()
+		var sample_height := maxi(16, int(round(192.0 * float(image.get_height()) / float(maxi(1, image.get_width())))))
+		sample.resize(192, sample_height, Image.INTERPOLATE_BILINEAR)
+	var spatial_metrics: Dictionary = _spatial_reference_override.analyze_image(sample)
+	metrics["spatial"] = clampf(float(spatial_metrics.get("risk", 0.0)), 0.0, 1.35)
+	metrics["spatial_pattern_area"] = float(spatial_metrics.get("area", 0.0))
+	metrics["spatial_pattern_pairs"] = float(spatial_metrics.get("pairs", 0.0))
+	metrics["spatial_pattern_regularity"] = float(spatial_metrics.get("regularity", 0.0))
+	metrics["spatial_backend"] = "cpu-regularity-reference"
 
 func _restore_debug_analyzer_state(analyzer, state: Dictionary) -> void:
 	if analyzer != null and not state.is_empty() and analyzer.has_method("restore_runtime_state"):

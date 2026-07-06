@@ -760,7 +760,6 @@ func _process(delta: float) -> void:
 	if DisplayServer.get_name() == "headless":
 		if not quell_enabled:
 			metrics = _disabled_metrics(elapsed_seconds, "headless-disabled")
-			shader_parameters = _disabled_shader_parameters(metrics)
 		elif _is_frame_sequence_source(source):
 			var headless_sequence_image = _load_frame_sequence_image_for_demo(source, delta)
 			if headless_sequence_image != null:
@@ -772,7 +771,7 @@ func _process(delta: float) -> void:
 		else:
 			metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
 			metrics["metric_backend"] = "generated"
-		shader_parameters = _shader_parameters_for_metrics(metrics)
+		shader_parameters = _resolve_shader_parameters(metrics)
 		_apply_shader_parameter_metrics(metrics, shader_parameters)
 	elif has_gpu_frame_pipeline:
 		var ensure_start := Time.get_ticks_usec()
@@ -802,18 +801,10 @@ func _process(delta: float) -> void:
 					_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 					_profile_sample()
 					return
-				if not mitigation_enabled or (gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null):
-					var held_after_metrics: Dictionary
-					if not mitigation_enabled:
-						held_after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
-					elif _should_measure_after(metrics):
-						_after_sample_count += 1
-						_last_after_sample_frame = _process_frame_count
-						var held_after_start := Time.get_ticks_usec()
-						held_after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
-						_profile_add("after_analyze_us", Time.get_ticks_usec() - held_after_start)
-					else:
-						held_after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-held-skip")
+				if not _mitigation_active() or (gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null):
+					var held_after_start := Time.get_ticks_usec()
+					var held_after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-held-skip")
+					_profile_add("after_analyze_us", Time.get_ticks_usec() - held_after_start)
 					var held_feedback_start := Time.get_ticks_usec()
 					_apply_measured_after_metrics(metrics, held_after_metrics, after_analysis_delta)
 					_last_after_metrics = held_after_metrics.duplicate(false)
@@ -842,11 +833,8 @@ func _process(delta: float) -> void:
 			_profile_add_native_pipeline_profile("native_source_generate")
 		if not quell_enabled:
 			metrics = _disabled_metrics(elapsed_seconds, "gpu-frame-seq-disabled" if uploaded_sequence_frame else "gpu-disabled")
-			shader_parameters = _disabled_shader_parameters(metrics)
-			var disabled_mitigate_start := Time.get_ticks_usec()
-			gpu_frame_pipeline.apply_mitigation(shader_parameters)
-			_profile_add("output_apply_us", Time.get_ticks_usec() - disabled_mitigate_start)
-			_profile_add_native_pipeline_profile("native_output_apply")
+			shader_parameters = _resolve_shader_parameters(metrics)
+			_apply_mitigation_parameters(shader_parameters)
 			_last_runtime_metrics = metrics.duplicate(false)
 			_last_after_metrics = metrics.duplicate(false)
 			_last_shader_parameters = shader_parameters.duplicate(false)
@@ -865,33 +853,13 @@ func _process(delta: float) -> void:
 			metrics["metric_backend"] = "gpu-game-budget-raw-held"
 			shader_parameters = _last_shader_parameters.duplicate(false)
 			_profile_add("cache_us", Time.get_ticks_usec() - reuse_start)
-			var held_mitigate_start := Time.get_ticks_usec()
-			gpu_frame_pipeline.apply_mitigation(shader_parameters)
-			_profile_add("output_apply_us", Time.get_ticks_usec() - held_mitigate_start)
-			_profile_add_native_pipeline_profile("native_output_apply")
+			_apply_mitigation_parameters(shader_parameters)
 			var held_after_start := Time.get_ticks_usec()
-			var skipped_after_metrics: Dictionary
-			if not mitigation_enabled:
-				skipped_after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
-			elif _should_measure_after(metrics):
-				_after_sample_count += 1
-				_last_after_sample_frame = _process_frame_count
-				skipped_after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
-			else:
-				skipped_after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-raw-held-skip")
+			var skipped_after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-raw-held-skip")
 			_profile_add("after_analyze_us", Time.get_ticks_usec() - held_after_start)
 			var skipped_feedback_start := Time.get_ticks_usec()
-			_apply_measured_after_metrics(metrics, skipped_after_metrics, after_analysis_delta)
-			_last_after_metrics = skipped_after_metrics.duplicate(false)
-			_last_runtime_metrics = metrics.duplicate(false)
-			_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))))
+			_apply_after_feedback_to_output(metrics, skipped_after_metrics, after_analysis_delta, shader_parameters)
 			_profile_add("feedback_us", Time.get_ticks_usec() - skipped_feedback_start)
-			if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
-				var skipped_overlay_refresh_start := Time.get_ticks_usec()
-				gpu_frame_pipeline.refresh_developer_alpha_overlay(shader_parameters)
-				_profile_add("overlay_refresh_us", Time.get_ticks_usec() - skipped_overlay_refresh_start)
-				_profile_add_native_pipeline_profile("native_overlay_refresh")
-			_last_shader_parameters = shader_parameters.duplicate(false)
 			if uploaded_sequence_frame:
 				_last_frame_sequence_metrics = metrics.duplicate(false)
 			var skipped_hud_start := Time.get_ticks_usec()
@@ -922,56 +890,15 @@ func _process(delta: float) -> void:
 		_profile_add("controller_us", Time.get_ticks_usec() - controller_start)
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		var shader_start := Time.get_ticks_usec()
-		shader_parameters = _shader_parameters_for_metrics(metrics)
-		var solver_result: Dictionary = {}
-		if mitigation_enabled:
-			solver_result = current_frame_solver.solve(
-				gpu_frame_pipeline,
-				gpu_after_analyzer,
-				after_analyzer,
-				shader_parameters,
-				headroom_margin,
-				after_analysis_delta,
-				elapsed_seconds,
-				"frame_sequence" if uploaded_sequence_frame else "generated",
-				null,
-				false,
-				metrics
-			)
-		shader_parameters = solver_result.get("parameters", shader_parameters)
-		_apply_current_frame_solver_metrics(metrics, solver_result)
-		analyzer.apply_current_frame_shader_solution(shader_parameters, metrics)
-		_apply_shader_parameter_metrics(metrics, shader_parameters)
-		_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
-		_last_shader_parameters = shader_parameters.duplicate(false)
+		shader_parameters = _resolve_output_shader_parameters(metrics, after_analysis_delta, "frame_sequence" if uploaded_sequence_frame else "generated")
 		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
-		var mitigate_start := Time.get_ticks_usec()
-		gpu_frame_pipeline.apply_mitigation(shader_parameters)
-		_profile_add("output_apply_us", Time.get_ticks_usec() - mitigate_start)
-		_profile_add_native_pipeline_profile("native_output_apply")
+		_apply_mitigation_parameters(shader_parameters)
 		var after_analyze_start := Time.get_ticks_usec()
-		var after_metrics: Dictionary
-		if not mitigation_enabled:
-			after_metrics = _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
-		elif _should_measure_after(metrics):
-			_after_sample_count += 1
-			_last_after_sample_frame = _process_frame_count
-			after_metrics = _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
-		else:
-			after_metrics = _held_after_metrics(metrics, after_analysis_delta, "gpu-after-skip")
+		var after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-skip")
 		_profile_add("after_analyze_us", Time.get_ticks_usec() - after_analyze_start)
 		var feedback_start := Time.get_ticks_usec()
-		_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
-		_last_after_metrics = after_metrics.duplicate(false)
-		_last_runtime_metrics = metrics.duplicate(false)
-		_apply_overlay_metrics_to_shader_parameters(shader_parameters, metrics, float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))))
+		_apply_after_feedback_to_output(metrics, after_metrics, after_analysis_delta, shader_parameters)
 		_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
-		if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
-			var overlay_refresh_start := Time.get_ticks_usec()
-			gpu_frame_pipeline.refresh_developer_alpha_overlay(shader_parameters)
-			_profile_add("overlay_refresh_us", Time.get_ticks_usec() - overlay_refresh_start)
-			_profile_add_native_pipeline_profile("native_overlay_refresh")
-		_last_shader_parameters = shader_parameters.duplicate(false)
 		if uploaded_sequence_frame:
 			var store_start := Time.get_ticks_usec()
 			_last_frame_sequence_metrics = metrics.duplicate(false)
@@ -979,12 +906,11 @@ func _process(delta: float) -> void:
 	else:
 		if not quell_enabled:
 			metrics = _disabled_metrics(elapsed_seconds, "generated-disabled")
-			shader_parameters = _disabled_shader_parameters(metrics)
 		else:
 			metrics = analyzer.update_from_generated_source(source, delta, elapsed_seconds)
 			metrics["metric_backend"] = "generated"
-			shader_parameters = _shader_parameters_for_metrics(metrics)
-			_apply_shader_parameter_metrics(metrics, shader_parameters)
+		shader_parameters = _resolve_shader_parameters(metrics)
+		_apply_shader_parameter_metrics(metrics, shader_parameters)
 	var hud_start := Time.get_ticks_usec()
 	_update_hud(metrics)
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
@@ -1295,20 +1221,86 @@ func _apply_overlay_metrics_to_shader_parameters(parameters: Dictionary, metrics
 	parameters["target_risk_for_overlay"] = headroom_margin
 	parameters["time_for_overlay"] = float(metrics.get("time", elapsed_seconds))
 
-func _shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
-	if game_budget_enabled and analyzer != null and analyzer.has_method("game_budget_shader_parameters"):
-		return analyzer.game_budget_shader_parameters(metrics)
-	return analyzer.shader_parameters(metrics)
+func _mitigation_active() -> bool:
+	return quell_enabled and mitigation_enabled
 
-func _disabled_shader_parameters(metrics: Dictionary) -> Dictionary:
-	var was_mitigation_enabled: bool = mitigation_enabled
-	mitigation_enabled = false
-	_sync_analyzer_settings()
-	var parameters: Dictionary = _shader_parameters_for_metrics(metrics)
-	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, 0.0)
-	mitigation_enabled = was_mitigation_enabled
-	_sync_analyzer_settings()
+func _resolve_shader_parameters(metrics: Dictionary) -> Dictionary:
+	var parameters: Dictionary
+	if not _mitigation_active():
+		parameters = _identity_shader_parameters_for_metrics(metrics)
+	else:
+		if analyzer == null or not analyzer.has_method("resolve_shader_parameters"):
+			push_error("Quell analyzer does not provide resolve_shader_parameters; sync/build quell-core first.")
+			return {}
+		parameters = analyzer.resolve_shader_parameters(metrics, {"game_budget": game_budget_enabled})
 	return parameters
+
+func _identity_shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
+	if analyzer == null or not analyzer.has_method("identity_shader_parameters"):
+		push_error("Quell analyzer does not provide identity_shader_parameters; sync/build quell-core first.")
+		return {}
+	var parameters: Dictionary = analyzer.identity_shader_parameters(metrics)
+	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, 0.0)
+	return parameters
+
+func _solve_current_frame_parameters(metrics: Dictionary, base_parameters: Dictionary, after_analysis_delta: float, source_kind: String) -> Dictionary:
+	if not _mitigation_active():
+		return base_parameters
+	var solver_result: Dictionary = current_frame_solver.solve(
+		gpu_frame_pipeline,
+		gpu_after_analyzer,
+		after_analyzer,
+		base_parameters,
+		headroom_margin,
+		after_analysis_delta,
+		elapsed_seconds,
+		source_kind,
+		null,
+		false,
+		metrics
+	)
+	var parameters: Dictionary = solver_result.get("parameters", base_parameters)
+	_apply_current_frame_solver_metrics(metrics, solver_result)
+	analyzer.apply_current_frame_shader_solution(parameters, metrics)
+	return parameters
+
+func _resolve_output_shader_parameters(metrics: Dictionary, after_analysis_delta: float, source_kind: String) -> Dictionary:
+	var parameters: Dictionary = _resolve_shader_parameters(metrics)
+	parameters = _solve_current_frame_parameters(metrics, parameters, after_analysis_delta, source_kind)
+	_apply_shader_parameter_metrics(metrics, parameters)
+	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
+	_last_shader_parameters = parameters.duplicate(false)
+	return parameters
+
+func _apply_mitigation_parameters(parameters: Dictionary) -> void:
+	var mitigate_start := Time.get_ticks_usec()
+	gpu_frame_pipeline.apply_mitigation(parameters)
+	_profile_add("output_apply_us", Time.get_ticks_usec() - mitigate_start)
+	_profile_add_native_pipeline_profile("native_output_apply")
+
+func _refresh_developer_overlay(parameters: Dictionary) -> void:
+	if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
+		var overlay_refresh_start := Time.get_ticks_usec()
+		gpu_frame_pipeline.refresh_developer_alpha_overlay(parameters)
+		_profile_add("overlay_refresh_us", Time.get_ticks_usec() - overlay_refresh_start)
+		_profile_add_native_pipeline_profile("native_overlay_refresh")
+
+func _after_metrics_for_source(source: Dictionary, metrics: Dictionary, after_analysis_delta: float, held_reason: String) -> Dictionary:
+	if not _mitigation_active():
+		return _raw_as_after_metrics(metrics, "gpu-after-mitigation-off")
+	if _should_measure_after(metrics):
+		_after_sample_count += 1
+		_last_after_sample_frame = _process_frame_count
+		return _measure_after_for_source(source, elapsed_seconds, after_analysis_delta)
+	return _held_after_metrics(metrics, after_analysis_delta, held_reason)
+
+func _apply_after_feedback_to_output(metrics: Dictionary, after_metrics: Dictionary, after_analysis_delta: float, parameters: Dictionary) -> void:
+	_apply_measured_after_metrics(metrics, after_metrics, after_analysis_delta)
+	_last_after_metrics = after_metrics.duplicate(false)
+	_last_runtime_metrics = metrics.duplicate(false)
+	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, float(metrics.get("output_risk", metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))))
+	_refresh_developer_overlay(parameters)
+	_last_shader_parameters = parameters.duplicate(false)
 
 func _analyze_raw_source_texture(time_seconds: float) -> Dictionary:
 	if (
@@ -1338,10 +1330,10 @@ func _apply_measured_after_metrics(metrics: Dictionary, after_metrics: Dictionar
 
 func _visible_after_risk_for_metrics(metrics: Dictionary, after_metrics: Dictionary) -> float:
 	var measured_risk: float = float(after_metrics.get("raw_risk", 0.0))
-	if not mitigation_enabled:
+	if not _mitigation_active():
 		return measured_risk
-	if game_budget_enabled and metrics.has("solver_after_risk"):
-		return min(measured_risk, float(metrics.get("solver_after_risk", measured_risk)))
+	if game_budget_enabled and bool(after_metrics.get("measurement_skipped", false)):
+		return float(after_metrics.get("estimated_raw_risk", measured_risk))
 	return measured_risk
 
 func _update_hud(metrics: Dictionary) -> void:
