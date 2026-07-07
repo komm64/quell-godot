@@ -52,6 +52,8 @@ var _hard_projection_enabled := false
 var _oracle_projection_enabled := false
 # Oracle mitigation style: "risecap" (sharp/dark, default) or "lowpass" (bright glow).
 var _mitigation_style := "risecap"
+var _regional_luminance := false
+var _lookahead := 0   # buffered-analysis depth (frames) for regional luminance
 var _save_visible_after_output := false
 var _solver_bisection_steps := -1
 var _debug_preview_frame := -1
@@ -125,15 +127,32 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 	var projection = ProjectionReferenceClass.new()
 	projection.target_risk = DEFAULT_TARGET_RISK
 	projection.mitigation_style = ProjectionReferenceClass.STYLE_TEMPORAL_LOWPASS if _mitigation_style == "lowpass" else ProjectionReferenceClass.STYLE_RISE_CAP
+	projection.regional_luminance = _regional_luminance
 	projection.reset()
+
+	# Pass 1 (LOOKAHEAD): prepare every output frame's analysis image and, if a
+	# lookahead depth is set, compute a per-frame regional hazard over a window
+	# that includes FUTURE frames (the buffered-analysis idea). This lets regional
+	# luminance mitigate a fresh flashing region the instant it appears, with no
+	# cut-onset leak, at the cost of the buffer's display delay.
+	var analysis_images: Array = []
+	for out_index in range(output_frames):
+		var t := float(out_index) / _output_fps
+		var si := clampi(int(floor(t * _source_fps)), 0, frame_paths.size() - 1)
+		var src: Image = _load_image(String(frame_paths[si]))
+		analysis_images.append(_prepare_analysis_image(src, _analysis_size) if src != null else null)
+	var lookahead_hazards: Array = []
+	if _lookahead > 0 and _regional_luminance:
+		lookahead_hazards = _compute_lookahead_hazards(analysis_images, _lookahead)
+
 	for out_index in range(output_frames):
 		var time_seconds := float(out_index) / _output_fps
-		var source_index := clampi(int(floor(time_seconds * _source_fps)), 0, frame_paths.size() - 1)
-		var source_image: Image = _load_image(String(frame_paths[source_index]))
-		if source_image == null:
+		var analysis_source: Image = analysis_images[out_index]
+		if analysis_source == null:
 			_failed = true
 			continue
-		var analysis_source := _prepare_analysis_image(source_image, _analysis_size)
+		if out_index < lookahead_hazards.size():
+			projection.set_external_hazard(lookahead_hazards[out_index])
 		var projected: Image = projection.step(analysis_source, time_seconds)
 		_save_png(analysis_source, raw_dir.path_join("frame_%06d.png" % [out_index + 1]))
 		_save_png(projected, after_dir.path_join("frame_%06d.png" % [out_index + 1]))
@@ -180,6 +199,100 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 		"cases": cases,
 		"output_root": output_abs,
 	}
+
+# LOOKAHEAD hazard: for each output frame, a per-tile regional hazard computed
+# over a window [frame-depth .. frame+depth] (so it sees future frames). A tile
+# that flashes anywhere in that window is hazardous NOW, which is what removes the
+# cut-onset leak of the causal regional hazard. Matches the oracle's tile grid.
+func _compute_lookahead_hazards(analysis_images: Array, depth: int) -> Array:
+	var W: int = _analysis_size.x
+	var H: int = _analysis_size.y
+	var TS := 16
+	var cols := int(ceil(float(W) / float(TS)))
+	var rows := int(ceil(float(H) / float(TS)))
+	var n := analysis_images.size()
+	const DELTA := 0.10
+	const DARK := 0.80
+	const KNEE := 0.05
+	const FULL := 0.2
+	# Per-frame linear-luma arrays.
+	var lumas: Array = []
+	for f in range(n):
+		var img: Image = analysis_images[f]
+		var la := PackedFloat32Array()
+		la.resize(W * H)
+		if img != null:
+			for y in range(H):
+				for x in range(W):
+					la[y * W + x] = _lin_luma(img.get_pixel(x, y))
+		lumas.append(la)
+	# Per-frame per-tile flashing area (qualifying transition vs previous frame).
+	var flash: Array = []
+	for f in range(n):
+		var fa := PackedFloat32Array()
+		fa.resize(cols * rows)
+		if f > 0:
+			var cur: PackedFloat32Array = lumas[f]
+			var prev: PackedFloat32Array = lumas[f - 1]
+			var cnt := PackedInt32Array()
+			cnt.resize(cols * rows)
+			for y in range(H):
+				var tr := (y / TS) * cols
+				for x in range(W):
+					var i := y * W + x
+					if absf(cur[i] - prev[i]) >= DELTA and minf(cur[i], prev[i]) < DARK:
+						cnt[tr + (x / TS)] += 1
+			for t in range(cols * rows):
+				fa[t] = float(cnt[t]) / float(TS * TS)
+		flash.append(fa)
+	# Windowed (past+future) box sum -> knee/full -> blur.
+	var hazards: Array = []
+	for f in range(n):
+		var raw := PackedFloat32Array()
+		raw.resize(cols * rows)
+		for t in range(cols * rows):
+			var s := 0.0
+			for w in range(maxi(0, f - depth), mini(n, f + depth + 1)):
+				s += float((flash[w] as PackedFloat32Array)[t])
+			raw[t] = clampf((s - KNEE) / (FULL - KNEE), 0.0, 1.0)
+		hazards.append(_blur_tile_grid(raw, cols, rows))
+	return hazards
+
+func _lin_luma(c: Color) -> float:
+	return _srgb_lin(c.r) * 0.2126 + _srgb_lin(c.g) * 0.7152 + _srgb_lin(c.b) * 0.0722
+
+func _srgb_lin(v: float) -> float:
+	return v / 12.92 if v <= 0.04045 else pow((v + 0.055) / 1.055, 2.4)
+
+func _blur_tile_grid(field: PackedFloat32Array, cols: int, rows: int) -> PackedFloat32Array:
+	if cols <= 1 and rows <= 1:
+		return field
+	var current := field.duplicate()
+	for _pass in range(2):
+		var horizontal := current.duplicate()
+		for row in range(rows):
+			for col in range(cols):
+				var acc := 0.0
+				var num := 0
+				for dc in range(-1, 2):
+					var cc := col + dc
+					if cc < 0 or cc >= cols:
+						continue
+					acc += current[row * cols + cc]
+					num += 1
+				horizontal[row * cols + col] = acc / float(num)
+		for row in range(rows):
+			for col in range(cols):
+				var acc := 0.0
+				var num := 0
+				for dr in range(-1, 2):
+					var rr := row + dr
+					if rr < 0 or rr >= rows:
+						continue
+					acc += horizontal[rr * cols + col]
+					num += 1
+				current[row * cols + col] = acc / float(num)
+	return current
 
 func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
 	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
@@ -772,6 +885,11 @@ func _parse_args() -> void:
 			_hard_projection_enabled = true
 		elif arg == "--oracle-projection":
 			_oracle_projection_enabled = true
+		elif arg == "--regional-luminance" or arg == "--regional-luma":
+			_regional_luminance = true
+		elif arg.begins_with("--lookahead="):
+			_lookahead = maxi(0, int(arg.trim_prefix("--lookahead=")))
+			_regional_luminance = true
 		elif arg == "--lowpass" or arg == "--mitigation-style=lowpass":
 			_mitigation_style = "lowpass"
 		elif arg == "--rise-cap" or arg == "--mitigation-style=risecap":
