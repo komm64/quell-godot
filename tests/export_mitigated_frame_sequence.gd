@@ -226,6 +226,24 @@ func _compute_lookahead_hazards(analysis_images: Array, depth: int) -> Array:
 				for x in range(W):
 					la[y * W + x] = _lin_luma(img.get_pixel(x, y))
 		lumas.append(la)
+	# CONTENT MASK: the letterbox/pillarbox bars are constant black. A tile that is
+	# near-black in EVERY frame is a bar (never flashes, needs no mitigation); the
+	# problem it causes is the blur bleeding its 0-hazard into the adjacent content
+	# tiles, softening the gate at the content edge and leaking a boundary
+	# transition. Flag content tiles (bright in some frame) so the blur ignores bar
+	# tiles as neighbours and the content edge keeps its full hazard.
+	const CONTENT_LUMA := 0.05
+	var is_content := []
+	is_content.resize(cols * rows)
+	for t in range(cols * rows):
+		is_content[t] = false
+	for f in range(n):
+		var la2: PackedFloat32Array = lumas[f]
+		for y in range(H):
+			var tr2 := (y / TS) * cols
+			for x in range(W):
+				if la2[y * W + x] > CONTENT_LUMA:
+					is_content[tr2 + (x / TS)] = true
 	# Per-frame per-tile flashing area (qualifying transition vs previous frame).
 	var flash: Array = []
 	for f in range(n):
@@ -255,7 +273,7 @@ func _compute_lookahead_hazards(analysis_images: Array, depth: int) -> Array:
 			for w in range(maxi(0, f - depth), mini(n, f + depth + 1)):
 				s += float((flash[w] as PackedFloat32Array)[t])
 			raw[t] = clampf((s - KNEE) / (FULL - KNEE), 0.0, 1.0)
-		hazards.append(_blur_tile_grid(raw, cols, rows))
+		hazards.append(_blur_tile_grid_masked(raw, cols, rows, is_content))
 	return hazards
 
 func _lin_luma(c: Color) -> float:
@@ -264,7 +282,11 @@ func _lin_luma(c: Color) -> float:
 func _srgb_lin(v: float) -> float:
 	return v / 12.92 if v <= 0.04045 else pow((v + 0.055) / 1.055, 2.4)
 
-func _blur_tile_grid(field: PackedFloat32Array, cols: int, rows: int) -> PackedFloat32Array:
+# Separable box blur that averages ONLY over content tiles (see is_content): a
+# content tile at the picture edge is not pulled toward the bars' 0 hazard, so its
+# gate stays full and the boundary does not leak. Bar tiles keep their own value
+# (unused — they are black, nothing to mitigate).
+func _blur_tile_grid_masked(field: PackedFloat32Array, cols: int, rows: int, is_content: Array) -> PackedFloat32Array:
 	if cols <= 1 and rows <= 1:
 		return field
 	var current := field.duplicate()
@@ -272,26 +294,32 @@ func _blur_tile_grid(field: PackedFloat32Array, cols: int, rows: int) -> PackedF
 		var horizontal := current.duplicate()
 		for row in range(rows):
 			for col in range(cols):
+				if not is_content[row * cols + col]:
+					continue
 				var acc := 0.0
 				var num := 0
 				for dc in range(-1, 2):
 					var cc := col + dc
-					if cc < 0 or cc >= cols:
+					if cc < 0 or cc >= cols or not is_content[row * cols + cc]:
 						continue
 					acc += current[row * cols + cc]
 					num += 1
-				horizontal[row * cols + col] = acc / float(num)
+				if num > 0:
+					horizontal[row * cols + col] = acc / float(num)
 		for row in range(rows):
 			for col in range(cols):
+				if not is_content[row * cols + col]:
+					continue
 				var acc := 0.0
 				var num := 0
 				for dr in range(-1, 2):
 					var rr := row + dr
-					if rr < 0 or rr >= rows:
+					if rr < 0 or rr >= rows or not is_content[rr * cols + col]:
 						continue
 					acc += horizontal[rr * cols + col]
 					num += 1
-				current[row * cols + col] = acc / float(num)
+				if num > 0:
+					current[row * cols + col] = acc / float(num)
 	return current
 
 func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
