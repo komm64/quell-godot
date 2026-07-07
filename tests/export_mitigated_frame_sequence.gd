@@ -322,6 +322,21 @@ func _blur_tile_grid_masked(field: PackedFloat32Array, cols: int, rows: int, is_
 					current[row * cols + col] = acc / float(num)
 	return current
 
+func _upload_oracle_hazard(pipeline, solver) -> RID:
+	var cols: int = solver.get_hazard_cols()
+	var rows: int = solver.get_hazard_rows()
+	if cols <= 0 or rows <= 0:
+		return RID()
+	var field: PackedFloat32Array = solver.get_hazard_field()
+	if field.size() < cols * rows:
+		return RID()
+	var bytes := PackedByteArray()
+	bytes.resize(cols * rows)
+	for i in range(cols * rows):
+		bytes[i] = clampi(int(field[i] * 255.0), 0, 255)
+	var img := Image.create_from_data(cols, rows, false, Image.FORMAT_R8, bytes)
+	return pipeline.upload_hazard_map(img)
+
 func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
 	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
 	if _max_seconds > 0.0:
@@ -370,8 +385,16 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 			"tone_floor": float(solver.last_solution.get("tone_floor", 0.0)),
 			"spatial_contrast_scale": solver.last_spatial_scale,
 			"spatial_mean_luma": solver.last_spatial_mean,
+			"mitigation_style": float(solver.mitigation_style),
+			"general_transition_area": float(solver.last_solution.get("raw_hazard_area", 0.0)),
+			"target_risk": solver.target_risk,
+			"safety_margin": solver.safety_margin,
 		}
-		pipeline.apply_mitigation(shader_parameters)
+		# Feed the oracle's regional hazard field to the GPU red cap so it caps red
+		# only in flashing regions (mirrors _project_red), instead of greying all
+		# saturated red as the absolute cap did.
+		var haz_rid := _upload_oracle_hazard(pipeline, solver)
+		pipeline.apply_mitigation(shader_parameters, haz_rid)
 		var clean_after: Image = _read_texture_image(_after_output_texture(pipeline))
 		if clean_after == null:
 			_failed = true
