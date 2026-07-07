@@ -51,7 +51,7 @@ var _native_enabled := false
 var _hard_projection_enabled := false
 var _oracle_projection_enabled := false
 # Oracle mitigation style: "risecap" (sharp/dark, default) or "lowpass" (bright glow).
-var _mitigation_style := "risecap"
+var _mitigation_style := "lowpass"
 var _regional_luminance := false
 var _lookahead := 0   # buffered-analysis depth (frames) for regional luminance
 var _save_visible_after_output := false

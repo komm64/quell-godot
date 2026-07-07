@@ -17,7 +17,7 @@ const TARGET_RISK := 0.80
 
 var _paths: PackedStringArray = PackedStringArray()
 var _oracle
-var _style := 0                      # STYLE_RISE_CAP
+var _style := 1                      # STYLE_TEMPORAL_LOWPASS (default)
 var _out_index := 0
 var _output_frames := 0
 var _play_accum := 0.0
