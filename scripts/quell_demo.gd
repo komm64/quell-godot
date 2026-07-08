@@ -177,6 +177,9 @@ var _last_frame_sequence_metrics: Dictionary = {}
 var _last_runtime_metrics: Dictionary = {}
 var _last_after_metrics: Dictionary = {}
 var _last_shader_parameters: Dictionary = {}
+# Opt-in: drive the GPU hard-projection pass (mode 3 = temporal low-pass) instead
+# of the legacy heuristic mitigator. Enabled with --quell-hard-projection.
+var _hard_projection := false
 var _last_raw_sample_frame: int = -999999
 var _last_after_sample_frame: int = -999999
 var _next_hud_update_time: float = 0.0
@@ -217,6 +220,7 @@ func _ready() -> void:
 	quell_enabled = not (_cmdline_has_flag("--quell-disabled") or _cmdline_has_flag("--quell-off"))
 	if _cmdline_has_flag("--quell-enabled") or _cmdline_has_flag("--quell-on"):
 		quell_enabled = true
+	_hard_projection = _cmdline_has_flag("--quell-hard-projection")
 	game_budget_enabled = GAME_BUDGET_DEFAULT_ENABLED
 	game_budget_skip_raw_risk = false
 	game_budget_projection_mode = GAME_BUDGET_PROJECTION_CLOSED_FORM
@@ -892,7 +896,10 @@ func _process(delta: float) -> void:
 		var shader_start := Time.get_ticks_usec()
 		shader_parameters = _resolve_output_shader_parameters(metrics, after_analysis_delta, "frame_sequence" if uploaded_sequence_frame else "generated")
 		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
-		_apply_mitigation_parameters(shader_parameters)
+		if _hard_projection:
+			_apply_mitigation_parameters(_hard_projection_parameters(shader_parameters, metrics), _analyzer_hazard_rid())
+		else:
+			_apply_mitigation_parameters(shader_parameters)
 		var after_analyze_start := Time.get_ticks_usec()
 		var after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-skip")
 		_profile_add("after_analyze_us", Time.get_ticks_usec() - after_analyze_start)
@@ -1272,11 +1279,29 @@ func _resolve_output_shader_parameters(metrics: Dictionary, after_analysis_delta
 	_last_shader_parameters = parameters.duplicate(false)
 	return parameters
 
-func _apply_mitigation_parameters(parameters: Dictionary) -> void:
+func _apply_mitigation_parameters(parameters: Dictionary, hazard_rid: RID = RID()) -> void:
 	var mitigate_start := Time.get_ticks_usec()
-	gpu_frame_pipeline.apply_mitigation(parameters)
+	gpu_frame_pipeline.apply_mitigation(parameters, hazard_rid)
 	_profile_add("output_apply_us", Time.get_ticks_usec() - mitigate_start)
 	_profile_add_native_pipeline_profile("native_output_apply")
+
+# When --quell-hard-projection is set, replace the legacy heuristic shader params
+# with the hard-projection (mode 3, temporal low-pass) params the GPU pass needs:
+# the raw general-transition area drives the native enforcement envelope, and the
+# GPU analyzer's regional hazard texture gates the red cap.
+func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary) -> Dictionary:
+	var p: Dictionary = parameters.duplicate(false)
+	p["mitigation_mode"] = 3
+	p["mitigation_style"] = 1.0 # STYLE_TEMPORAL_LOWPASS
+	p["general_transition_area"] = float(metrics.get("general_transition_area", 0.0))
+	p["target_risk"] = 0.80
+	p["safety_margin"] = 0.90
+	return p
+
+func _analyzer_hazard_rid() -> RID:
+	if gpu_analyzer != null and gpu_analyzer.hazard_texture != null:
+		return gpu_analyzer.hazard_texture.texture_rd_rid
+	return RID()
 
 func _refresh_developer_overlay(parameters: Dictionary) -> void:
 	if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
