@@ -361,6 +361,7 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 	# gate re-measures the saved frames.
 	var solver = ProjectionReferenceClass.new()
 	solver.target_risk = DEFAULT_TARGET_RISK
+	solver.mitigation_style = ProjectionReferenceClass.STYLE_TEMPORAL_LOWPASS if _mitigation_style == "lowpass" else ProjectionReferenceClass.STYLE_RISE_CAP
 	solver.reset()
 
 	for out_index in range(output_frames):
