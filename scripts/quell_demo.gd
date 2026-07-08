@@ -124,6 +124,9 @@ var analyzer
 var after_analyzer
 var gpu_analyzer
 var gpu_after_analyzer
+var _hp_after_analyzer
+var _hp_after_risk_env: float = 0.0
+const HP_AFTER_RISK_RELEASE := 0.02
 var current_frame_solver
 var gpu_frame_pipeline
 var source_viewport: SubViewport
@@ -229,6 +232,7 @@ func _ready() -> void:
 	after_analyzer = NativeBridgeClass.instantiate_native_analyzer()
 	gpu_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
 	gpu_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
+	_hp_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
 	current_frame_solver = NativeBridgeClass.instantiate_native_current_frame_solver()
 	gpu_frame_pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
 	if analyzer == null or after_analyzer == null or gpu_analyzer == null or gpu_after_analyzer == null or current_frame_solver == null or gpu_frame_pipeline == null:
@@ -898,14 +902,15 @@ func _process(delta: float) -> void:
 		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
 		if _hard_projection:
 			_apply_mitigation_parameters(_hard_projection_parameters(shader_parameters, metrics), _analyzer_hazard_rid())
+			_hp_measure_after(metrics, after_analysis_delta)
 		else:
 			_apply_mitigation_parameters(shader_parameters)
-		var after_analyze_start := Time.get_ticks_usec()
-		var after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-skip")
-		_profile_add("after_analyze_us", Time.get_ticks_usec() - after_analyze_start)
-		var feedback_start := Time.get_ticks_usec()
-		_apply_after_feedback_to_output(metrics, after_metrics, after_analysis_delta, shader_parameters)
-		_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
+			var after_analyze_start := Time.get_ticks_usec()
+			var after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-skip")
+			_profile_add("after_analyze_us", Time.get_ticks_usec() - after_analyze_start)
+			var feedback_start := Time.get_ticks_usec()
+			_apply_after_feedback_to_output(metrics, after_metrics, after_analysis_delta, shader_parameters)
+			_profile_add("feedback_us", Time.get_ticks_usec() - feedback_start)
 		if uploaded_sequence_frame:
 			var store_start := Time.get_ticks_usec()
 			_last_frame_sequence_metrics = metrics.duplicate(false)
@@ -1302,6 +1307,28 @@ func _analyzer_hazard_rid() -> RID:
 	if gpu_analyzer != null and gpu_analyzer.hazard_texture != null:
 		return gpu_analyzer.hazard_texture.texture_rd_rid
 	return RID()
+
+func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
+	var raw_risk: float = float(metrics.get("raw_risk", 0.0))
+	if _hp_after_analyzer == null or not _hp_after_analyzer.is_ready() or gpu_frame_pipeline == null or gpu_frame_pipeline.mitigated_after_texture == null:
+		return
+	# Score the After risk from the actually-flashing area of the mode-3 output.
+	# The low-pass drives the qualifying TRANSITIONS to ~0 (that is what makes it
+	# safe); the full update_from_metrics is NOT used because it inflates a stable
+	# BRIGHT output via general_flash_area/luminance even at zero transitions. A
+	# fast-attack / slow-release envelope holds a residual over ~1 s so the readout
+	# is stable and comparable to the windowed raw risk instead of flickering.
+	var gpu_after: Dictionary = _hp_after_analyzer.analyze_texture(gpu_frame_pipeline.mitigated_after_texture, elapsed_seconds)
+	var trans := float(gpu_after.get("general_transition_area", 0.0))
+	var red_trans := float(gpu_after.get("red_transition_area", 0.0))
+	var spatial := float(gpu_after.get("spatial_pattern_area", 0.0))
+	var frame_risk: float = minf(clampf(max(max(trans, red_trans), spatial) / 0.25, 0.0, 1.5), raw_risk)
+	_hp_after_risk_env = maxf(frame_risk, _hp_after_risk_env - HP_AFTER_RISK_RELEASE)
+	var after_risk: float = _hp_after_risk_env
+	metrics["output_risk"] = after_risk
+	metrics["solver_after_risk"] = after_risk
+	metrics["risk_reduction"] = max(0.0, raw_risk - after_risk)
+	metrics["reduction_ratio"] = clamp((raw_risk - after_risk) / max(raw_risk, 0.001), 0.0, 1.0)
 
 func _refresh_developer_overlay(parameters: Dictionary) -> void:
 	if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
