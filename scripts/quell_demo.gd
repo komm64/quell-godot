@@ -809,7 +809,16 @@ func _process(delta: float) -> void:
 					_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 					_profile_sample()
 					return
-				if not _mitigation_active() or (gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null):
+				if _hard_projection:
+					# Held video frame: the mode-3 output is unchanged, so re-measure
+					# it (not the legacy after path, which reports raw for mode 3).
+					var held_hp_start := Time.get_ticks_usec()
+					_hp_measure_after(metrics, after_analysis_delta)
+					_last_after_metrics = metrics.duplicate(false)
+					_last_runtime_metrics = metrics.duplicate(false)
+					_last_frame_sequence_metrics = metrics.duplicate(false)
+					_profile_add("after_analyze_us", Time.get_ticks_usec() - held_hp_start)
+				elif not _mitigation_active() or (gpu_frame_pipeline != null and gpu_frame_pipeline.after_texture != null):
 					var held_after_start := Time.get_ticks_usec()
 					var held_after_metrics: Dictionary = _after_metrics_for_source(source, metrics, after_analysis_delta, "gpu-after-held-skip")
 					_profile_add("after_analyze_us", Time.get_ticks_usec() - held_after_start)
