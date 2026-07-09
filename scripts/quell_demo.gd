@@ -223,7 +223,9 @@ func _ready() -> void:
 	quell_enabled = not (_cmdline_has_flag("--quell-disabled") or _cmdline_has_flag("--quell-off"))
 	if _cmdline_has_flag("--quell-enabled") or _cmdline_has_flag("--quell-on"):
 		quell_enabled = true
-	_hard_projection = _cmdline_has_flag("--quell-hard-projection")
+	# Hard projection (mode-3 temporal low-pass) is the shipped DEFAULT. The old
+	# heuristic is opt-in via --quell-legacy-mitigation (kept for A/B comparison).
+	_hard_projection = not _cmdline_has_flag("--quell-legacy-mitigation")
 	game_budget_enabled = GAME_BUDGET_DEFAULT_ENABLED
 	game_budget_skip_raw_risk = false
 	game_budget_projection_mode = GAME_BUDGET_PROJECTION_CLOSED_FORM
@@ -238,6 +240,10 @@ func _ready() -> void:
 	if analyzer == null or after_analyzer == null or gpu_analyzer == null or gpu_after_analyzer == null or current_frame_solver == null or gpu_frame_pipeline == null:
 		_build_notice("Quell native core could not be instantiated.\nBuild/load addons/quell_core_native before launching the demo.")
 		return
+	# Keep the analyzer's parameter emission in step with the demo apply path so the
+	# legacy toggle exercises the whole heuristic chain (not a mode-3 param + legacy apply).
+	analyzer.hard_projection = _hard_projection
+	after_analyzer.hard_projection = _hard_projection
 	mitigation_mode = MITIGATION_MODE_CURRENT_FRAME_ONLY
 	game_budget_policy = GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
 	spatial_sensitivity = SPATIAL_SENSITIVITY_BALANCED
@@ -1307,14 +1313,26 @@ func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary) ->
 	var p: Dictionary = parameters.duplicate(false)
 	p["mitigation_mode"] = 3
 	p["mitigation_style"] = 1.0 # STYLE_TEMPORAL_LOWPASS
-	p["general_transition_area"] = float(metrics.get("general_transition_area", 0.0))
+	# Drive the native enforcement envelope from the strongest per-frame flashing
+	# signal. The processed general_transition_area alone reads low in the demo's
+	# 60/24 fps loop (throttled/smoothed) — much weaker than the oracle's
+	# raw_hazard_area the export uses — so the low-pass under-engages. Take the max
+	# of the transition/flash areas so a genuine flash builds full enforcement.
+	p["general_transition_area"] = max(
+		float(metrics.get("general_transition_area", 0.0)),
+		float(metrics.get("general_flash_area", 0.0)),
+		float(metrics.get("red_transition_area", 0.0)),
+		float(metrics.get("red_flash_area", 0.0)))
 	p["target_risk"] = 0.80
 	p["safety_margin"] = 0.90
 	return p
 
 func _analyzer_hazard_rid() -> RID:
-	if gpu_analyzer != null and gpu_analyzer.hazard_texture != null:
-		return gpu_analyzer.hazard_texture.texture_rd_rid
+	# Use the temporally-SMOOTHED regional hazard map (fast-attack/slow-release),
+	# not the raw per-frame hazard_texture: the raw one flashes with the source, so
+	# the red cap would engage only on flash frames and flicker red<->grey.
+	if gpu_analyzer != null and gpu_analyzer.hazard_map_texture != null:
+		return gpu_analyzer.hazard_map_texture.texture_rd_rid
 	return RID()
 
 func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
