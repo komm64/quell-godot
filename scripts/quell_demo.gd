@@ -121,16 +121,13 @@ var debug_menu_hidden := false
 var debug_menu_toggle_enabled := DEBUG_MENU_DEFAULT_ENABLED
 
 var analyzer
-var after_analyzer
 var gpu_analyzer
-var gpu_after_analyzer
 var _hp_after_analyzer
 # Sentinel for "After risk not measured this cycle". Distinct from a measured 0 so
 # the display can show a gap instead of a misleading safe reading.
 const AFTER_RISK_UNMEASURED := -1.0
 # The last measured After risk (written ONLY by _hp_measure_after). Starts unmeasured.
 var _measured_after_risk: float = AFTER_RISK_UNMEASURED
-var current_frame_solver
 var gpu_frame_pipeline
 var source_viewport: SubViewport
 var source_display: TextureRect
@@ -232,19 +229,13 @@ func _ready() -> void:
 	game_budget_projection_mode = GAME_BUDGET_PROJECTION_CLOSED_FORM
 	current_frame_solver_enabled = true
 	analyzer = NativeBridgeClass.instantiate_native_analyzer()
-	after_analyzer = NativeBridgeClass.instantiate_native_analyzer()
 	gpu_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
-	gpu_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
 	_hp_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
-	current_frame_solver = NativeBridgeClass.instantiate_native_current_frame_solver()
 	gpu_frame_pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
-	if analyzer == null or after_analyzer == null or gpu_analyzer == null or gpu_after_analyzer == null or current_frame_solver == null or gpu_frame_pipeline == null:
+	if analyzer == null or gpu_analyzer == null or _hp_after_analyzer == null or gpu_frame_pipeline == null:
 		_build_notice("Quell native core could not be instantiated.\nBuild/load addons/quell_core_native before launching the demo.")
 		return
-	# Keep the analyzer's parameter emission in step with the demo apply path so the
-	# legacy toggle exercises the whole heuristic chain (not a mode-3 param + legacy apply).
 	analyzer.hard_projection = _hard_projection
-	after_analyzer.hard_projection = _hard_projection
 	mitigation_mode = MITIGATION_MODE_CURRENT_FRAME_ONLY
 	game_budget_policy = GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
 	spatial_sensitivity = SPATIAL_SENSITIVITY_BALANCED
@@ -265,7 +256,6 @@ func _load_core_classes() -> bool:
 		NativeBridgeClass.is_analyzer_available()
 		and NativeBridgeClass.is_gpu_analyzer_available()
 		and NativeBridgeClass.is_gpu_frame_pipeline_available()
-		and NativeBridgeClass.is_current_frame_solver_available()
 	)
 	return _core_available
 
@@ -296,8 +286,6 @@ func _build_notice(message: String) -> void:
 func _exit_tree() -> void:
 	if gpu_analyzer != null:
 		gpu_analyzer.dispose()
-	if gpu_after_analyzer != null:
-		gpu_after_analyzer.dispose()
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.dispose()
 
@@ -911,7 +899,7 @@ func _build_visual_layers() -> void:
 	var source := _current_source_config()
 	var display_size := _pipeline_display_size_for_source(source)
 	var analysis_size := _pipeline_analysis_size_for_source(source, display_size)
-	if gpu_frame_pipeline != null and gpu_analyzer.is_ready() and gpu_after_analyzer.is_ready() and gpu_frame_pipeline.configure(display_size, analysis_size):
+	if gpu_frame_pipeline != null and gpu_analyzer.is_ready() and _hp_after_analyzer.is_ready() and gpu_frame_pipeline.configure(display_size, analysis_size):
 		source_display = TextureRect.new()
 		source_display.name = "GpuAfterDisplayFullRes"
 		source_display.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1385,29 +1373,7 @@ func _sync_analyzer_settings() -> void:
 	if _object_has_property(analyzer, "game_budget_policy"):
 		analyzer.game_budget_policy = game_budget_policy
 	_apply_contribution_settings(analyzer)
-	after_analyzer.viewing_distance_m = viewing_distance_m
-	after_analyzer.headroom_margin = headroom_margin
-	after_analyzer.mitigation_enabled = false
-	after_analyzer.mitigation_mode = mitigation_mode
-	after_analyzer.temporal_blend_alpha = temporal_blend_alpha
-	after_analyzer.max_contrast_compression = max_contrast_compression
-	after_analyzer.max_brightness_reduction = max_brightness_reduction
-	after_analyzer.max_feedback_amount = max_feedback_amount
-	after_analyzer.local_correction_enabled = local_correction_enabled
-	after_analyzer.preserve_source_hue = preserve_source_hue
-	after_analyzer.spatial_sensitivity = spatial_sensitivity
-	_apply_contribution_settings(after_analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
-	gpu_after_analyzer.viewing_distance_m = viewing_distance_m
-	current_frame_solver.enabled = quell_enabled and current_frame_solver_enabled
-	if _object_has_property(current_frame_solver, "analytic_enabled"):
-		current_frame_solver.analytic_enabled = quell_enabled and current_frame_solver_enabled
-	if _object_has_property(current_frame_solver, "game_budget_enabled"):
-		current_frame_solver.game_budget_enabled = game_budget_enabled
-	if _object_has_property(current_frame_solver, "game_budget_projection_mode"):
-		current_frame_solver.game_budget_projection_mode = game_budget_projection_mode
-	if _object_has_property(current_frame_solver, "fast_identity_enabled"):
-		current_frame_solver.fast_identity_enabled = game_budget_enabled
 
 func _default_contribution_enabled() -> Dictionary:
 	return {
@@ -1426,9 +1392,8 @@ func _reset_analysis_state(reset_graph: bool = true) -> void:
 
 func _reset_history_state(reset_graph: bool = true, reset_playback: bool = true) -> void:
 	analyzer.reset()
-	after_analyzer.reset()
 	gpu_analyzer.reset()
-	gpu_after_analyzer.reset()
+	_hp_after_analyzer.reset()
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.reset_output_history()
 	analyzer.set_mitigation_strength(_prewarm_mitigation_for_mode(_current_source_config()))
@@ -1802,7 +1767,7 @@ func _has_gpu_frame_pipeline() -> bool:
 		and gpu_frame_pipeline.after_texture != null
 		and gpu_frame_pipeline.analysis_source_texture != null
 		and gpu_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_source_texture)
-		and gpu_after_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_after_texture)
+		and _hp_after_analyzer.can_analyze_texture(gpu_frame_pipeline.analysis_after_texture)
 	)
 
 func _gpu_frame_pipeline_mitigated_after_texture() -> Texture2D:
