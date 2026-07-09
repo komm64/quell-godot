@@ -1298,7 +1298,15 @@ func _resolve_output_shader_parameters(metrics: Dictionary, after_analysis_delta
 	if not _hard_projection:
 		parameters = _solve_current_frame_parameters(metrics, parameters, after_analysis_delta, source_kind)
 	_apply_shader_parameter_metrics(metrics, parameters)
-	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
+	# Pre-apply overlay estimate. In mode-3 the real after-risk is only known after
+	# apply (via _hp_measure_after, which re-bakes the overlay); without the solver
+	# there is no solver_after_risk, so fall back to the previous measured mode-3
+	# after (the release-held envelope) instead of raw_risk — otherwise the graph
+	# records a raw ~135% spike every frame before the post-apply correction.
+	var overlay_after_estimate: float = float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))
+	if _hard_projection:
+		overlay_after_estimate = _hp_after_risk_env
+	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, overlay_after_estimate)
 	_last_shader_parameters = parameters.duplicate(false)
 	return parameters
 
