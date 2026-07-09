@@ -1364,6 +1364,9 @@ func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
 	var spatial := float(gpu_after.get("spatial_pattern_area", 0.0))
 	_measured_after_risk = minf(clampf(max(max(trans, red_trans), spatial) / 0.25, 0.0, 1.5), raw_risk)
 	metrics["output_risk"] = _measured_after_risk
+	# Surface the mode-3 enforcement level as the HUD Mitigation track (the legacy
+	# mitigation_strength is unused on this path, which left the graph pinned at 0).
+	metrics["mitigation"] = float(gpu_frame_pipeline.get_last_profile().get("enforcement", 0.0))
 
 func _refresh_developer_overlay(parameters: Dictionary) -> void:
 	if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):
