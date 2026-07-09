@@ -125,8 +125,11 @@ var after_analyzer
 var gpu_analyzer
 var gpu_after_analyzer
 var _hp_after_analyzer
-var _hp_after_risk_env: float = 0.0
-const HP_AFTER_RISK_RELEASE := 0.02
+# Sentinel for "After risk not measured this cycle". Distinct from a measured 0 so
+# the display can show a gap instead of a misleading safe reading.
+const AFTER_RISK_UNMEASURED := -1.0
+# The last measured After risk (written ONLY by _hp_measure_after). Starts unmeasured.
+var _measured_after_risk: float = AFTER_RISK_UNMEASURED
 var current_frame_solver
 var gpu_frame_pipeline
 var source_viewport: SubViewport
@@ -1292,21 +1295,20 @@ func _solve_current_frame_parameters(metrics: Dictionary, base_parameters: Dicti
 	return parameters
 
 func _resolve_output_shader_parameters(metrics: Dictionary, after_analysis_delta: float, source_kind: String) -> Dictionary:
+	if _hard_projection:
+		# Carry the single measured After forward (prior frame's real value, or the
+		# UNMEASURED sentinel) so the analyzer's _attach_overlay_metrics is the sole
+		# writer of the overlay After — no raw/estimated synthesis anywhere.
+		metrics["output_risk"] = _measured_after_risk
 	var parameters: Dictionary = _resolve_shader_parameters(metrics)
 	# The current-frame solver is a legacy/preview stage; mode-3 hard projection
 	# derives everything from the analyzer + GPU enforcement envelope, so skip it.
 	if not _hard_projection:
 		parameters = _solve_current_frame_parameters(metrics, parameters, after_analysis_delta, source_kind)
 	_apply_shader_parameter_metrics(metrics, parameters)
-	# Pre-apply overlay estimate. In mode-3 the real after-risk is only known after
-	# apply (via _hp_measure_after, which re-bakes the overlay); without the solver
-	# there is no solver_after_risk, so fall back to the previous measured mode-3
-	# after (the release-held envelope) instead of raw_risk — otherwise the graph
-	# records a raw ~135% spike every frame before the post-apply correction.
-	var overlay_after_estimate: float = float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0)))
-	if _hard_projection:
-		overlay_after_estimate = _hp_after_risk_env
-	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, overlay_after_estimate)
+	if not _hard_projection:
+		# Legacy path keeps its own after estimate for the overlay.
+		_apply_overlay_metrics_to_shader_parameters(parameters, metrics, float(metrics.get("output_risk", metrics.get("raw_risk", 0.0))))
 	_last_shader_parameters = parameters.duplicate(false)
 	return parameters
 
@@ -1346,27 +1348,22 @@ func _analyzer_hazard_rid() -> RID:
 		return gpu_analyzer.hazard_map_texture.texture_rd_rid
 	return RID()
 
+# SINGLE SOURCE OF TRUTH for the After risk. This is the ONLY writer of
+# metrics["output_risk"]. It scores the risk from the ACTUAL mode-3 output texture
+# (its residual flashing area). If the measurement cannot run, output_risk is left
+# UNWRITTEN (stays the AFTER_RISK_UNMEASURED sentinel) — never a synthesized/raw/
+# estimated value — so "measurement enabled but not measured" surfaces as a visible
+# gap in the display, not a misleading safe 0.
 func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics.get("raw_risk", 0.0))
 	if _hp_after_analyzer == null or not _hp_after_analyzer.is_ready() or gpu_frame_pipeline == null or gpu_frame_pipeline.mitigated_after_texture == null:
 		return
-	# Score the After risk from the actually-flashing area of the mode-3 output.
-	# The low-pass drives the qualifying TRANSITIONS to ~0 (that is what makes it
-	# safe); the full update_from_metrics is NOT used because it inflates a stable
-	# BRIGHT output via general_flash_area/luminance even at zero transitions. A
-	# fast-attack / slow-release envelope holds a residual over ~1 s so the readout
-	# is stable and comparable to the windowed raw risk instead of flickering.
 	var gpu_after: Dictionary = _hp_after_analyzer.analyze_texture(gpu_frame_pipeline.mitigated_after_texture, elapsed_seconds)
 	var trans := float(gpu_after.get("general_transition_area", 0.0))
 	var red_trans := float(gpu_after.get("red_transition_area", 0.0))
 	var spatial := float(gpu_after.get("spatial_pattern_area", 0.0))
-	var frame_risk: float = minf(clampf(max(max(trans, red_trans), spatial) / 0.25, 0.0, 1.5), raw_risk)
-	_hp_after_risk_env = maxf(frame_risk, _hp_after_risk_env - HP_AFTER_RISK_RELEASE)
-	var after_risk: float = _hp_after_risk_env
-	metrics["output_risk"] = after_risk
-	metrics["solver_after_risk"] = after_risk
-	metrics["risk_reduction"] = max(0.0, raw_risk - after_risk)
-	metrics["reduction_ratio"] = clamp((raw_risk - after_risk) / max(raw_risk, 0.001), 0.0, 1.0)
+	_measured_after_risk = minf(clampf(max(max(trans, red_trans), spatial) / 0.25, 0.0, 1.5), raw_risk)
+	metrics["output_risk"] = _measured_after_risk
 
 func _refresh_developer_overlay(parameters: Dictionary) -> void:
 	if gpu_frame_pipeline != null and gpu_frame_pipeline.has_method("refresh_developer_alpha_overlay"):

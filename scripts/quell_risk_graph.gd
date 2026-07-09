@@ -27,7 +27,9 @@ func reset() -> void:
 
 func add_sample(time_seconds: float, metrics: Dictionary) -> void:
 	var raw: float = float(metrics.get("raw_risk", metrics.get("predicted", 0.0)))
-	var output: float = float(metrics.get("output_risk", 0.0))
+	# output_risk < 0 (or absent) means "After not measured this cycle" — kept as a
+	# negative sentinel so the series draws a gap, never a misleading safe 0.
+	var output: float = float(metrics.get("output_risk", -1.0))
 	var mitigation: float = float(metrics.get("mitigation", 0.0))
 
 	var sample := {
@@ -111,19 +113,27 @@ func _draw_series(plot: Rect2, key: String, color: Color, width: float, max_valu
 	if samples.size() < 2:
 		return
 
-	var points: PackedVector2Array = PackedVector2Array()
 	var draw_count: int = min(samples.size(), max(2, int(plot.size.x) + 1))
 	var first_sample: float = max(0.0, float(samples.size() - MAX_SAMPLES))
 	var last_sample: float = float(samples.size() - 1)
 
+	# Draw contiguous MEASURED runs as separate polylines; a negative value means the
+	# metric was not measured for that span and leaves a gap (never plotted as 0).
+	var segment: PackedVector2Array = PackedVector2Array()
 	for i in range(draw_count):
 		var t: float = float(i) / float(max(1, draw_count - 1))
 		var sample_position: float = lerpf(first_sample, last_sample, t)
+		var value: float = _interpolated_value(key, sample_position)
+		if value < 0.0:
+			if segment.size() >= 2:
+				draw_polyline(segment, color, width, true)
+			segment = PackedVector2Array()
+			continue
 		var x: float = plot.position.x + plot.size.x * t
-		var y: float = _value_to_y(plot, _interpolated_value(key, sample_position), max_value)
-		points.append(Vector2(x, y))
-
-	draw_polyline(points, color, width, true)
+		var y: float = _value_to_y(plot, value, max_value)
+		segment.append(Vector2(x, y))
+	if segment.size() >= 2:
+		draw_polyline(segment, color, width, true)
 
 func _interpolated_value(key: String, sample_position: float) -> float:
 	var lower_index: int = clampi(int(floor(sample_position)), 0, samples.size() - 1)
