@@ -1293,7 +1293,10 @@ func _solve_current_frame_parameters(metrics: Dictionary, base_parameters: Dicti
 
 func _resolve_output_shader_parameters(metrics: Dictionary, after_analysis_delta: float, source_kind: String) -> Dictionary:
 	var parameters: Dictionary = _resolve_shader_parameters(metrics)
-	parameters = _solve_current_frame_parameters(metrics, parameters, after_analysis_delta, source_kind)
+	# The current-frame solver is a legacy/preview stage; mode-3 hard projection
+	# derives everything from the analyzer + GPU enforcement envelope, so skip it.
+	if not _hard_projection:
+		parameters = _solve_current_frame_parameters(metrics, parameters, after_analysis_delta, source_kind)
 	_apply_shader_parameter_metrics(metrics, parameters)
 	_apply_overlay_metrics_to_shader_parameters(parameters, metrics, float(metrics.get("solver_after_risk", metrics.get("raw_risk", 0.0))))
 	_last_shader_parameters = parameters.duplicate(false)
