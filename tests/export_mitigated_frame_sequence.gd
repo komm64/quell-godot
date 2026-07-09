@@ -2,7 +2,6 @@ extends SceneTree
 
 const RuntimeAnalyzerClass = preload("res://addons/quell_core/runtime/quell_analyzer.gd")
 const GpuAnalyzerClass = preload("res://addons/quell_core/runtime/quell_gpu_analyzer.gd")
-const FramePipelineClass = preload("res://addons/quell_core/runtime/quell_gpu_frame_pipeline.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 const ProjectionReferenceClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
 const SpatialReferenceClass = preload("res://addons/quell_core/runtime/quell_spatial_reference.gd")
@@ -512,12 +511,17 @@ func _make_gpu_analyzer():
 	return GpuAnalyzerClass.new()
 
 func _make_frame_pipeline():
-	if _native_enabled:
-		var pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
-		if pipeline == null:
-			push_error("QuellNativeGpuFramePipeline is unavailable")
-		return pipeline
-	return FramePipelineClass.new()
+	# The GPU hard-projection pass exists only in the native pipeline; the
+	# GDScript QuellGpuFramePipeline is analysis-only (its legacy heuristic
+	# mitigator was removed). Fall back to --oracle-projection when the native
+	# extension is unavailable.
+	if not _native_enabled:
+		push_error("GPU export requires the native pipeline (--native); use the oracle projection export instead")
+		return null
+	var pipeline = NativeBridgeClass.instantiate_native_gpu_frame_pipeline()
+	if pipeline == null:
+		push_error("QuellNativeGpuFramePipeline is unavailable")
+	return pipeline
 
 func _globalize_path(path: String) -> String:
 	if path.begins_with("res://"):
