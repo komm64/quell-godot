@@ -6,15 +6,8 @@ const TMP_VIDEO_FRAME_MANIFEST := "manifest.json"
 const RiskGraphClass = preload("res://scripts/quell_risk_graph.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
-const MITIGATION_MODE_CURRENT_FRAME_ONLY := 0
-const MITIGATION_MODE_TEMPORAL_BLEND := 1
-const MITIGATION_MODE_ADAPTIVE := 2
 const SPATIAL_SENSITIVITY_STRICT := 0
 const SPATIAL_SENSITIVITY_BALANCED := 1
-const GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS := 0
-const GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER := 1
-const GAME_BUDGET_PROJECTION_LEGACY := 0
-const GAME_BUDGET_PROJECTION_CLOSED_FORM := 1
 
 var _core_available := false
 
@@ -101,18 +94,11 @@ var elapsed_seconds := 0.0
 var current_mode := 0
 var quell_enabled := true
 var mitigation_enabled := true
-var mitigation_mode := 0
-var temporal_blend_alpha := 0.50
 var max_contrast_compression := 0.65
 var max_brightness_reduction := 0.50
 var max_feedback_amount := 0.60
-var local_correction_enabled := true
 var preserve_source_hue := true
-var current_frame_solver_enabled := true
 var game_budget_enabled := GAME_BUDGET_DEFAULT_ENABLED
-var game_budget_skip_raw_risk := false
-var game_budget_policy := 0
-var game_budget_projection_mode := GAME_BUDGET_PROJECTION_CLOSED_FORM
 var spatial_sensitivity := 0
 var viewing_distance_m := 0.60
 var headroom_margin := 0.80
@@ -134,21 +120,13 @@ var source_display: TextureRect
 var content_material: ShaderMaterial
 var mode_select: OptionButton
 var quell_toggle: CheckButton
-var mitigation_mode_select: OptionButton
 var spatial_sensitivity_select: OptionButton
 var mitigation_toggle: CheckButton
-var local_correction_toggle: CheckButton
 var hue_preserve_toggle: CheckButton
-var current_frame_solver_toggle: CheckButton
-var game_budget_toggle: CheckButton
-var game_budget_skip_raw_risk_toggle: CheckButton
-var game_budget_policy_select: OptionButton
-var game_budget_projection_select: OptionButton
 var frame_sequence_seek_slider: HSlider
 var frame_sequence_seek_label: Label
 var distance_value_label: Label
 var headroom_value_label: Label
-var temporal_blend_value_label: Label
 var contrast_limit_slider: HSlider
 var contrast_limit_value_label: Label
 var brightness_limit_slider: HSlider
@@ -180,9 +158,6 @@ var _last_frame_sequence_metrics: Dictionary = {}
 var _last_runtime_metrics: Dictionary = {}
 var _last_after_metrics: Dictionary = {}
 var _last_shader_parameters: Dictionary = {}
-# Mode-3 hard projection (temporal low-pass) is the only shipped mitigation path.
-# Kept as a member (always true) because the analyzer takes it as a flag.
-var _hard_projection := true
 var _last_raw_sample_frame: int = -999999
 var _last_after_sample_frame: int = -999999
 var _next_hud_update_time: float = 0.0
@@ -223,11 +198,6 @@ func _ready() -> void:
 	quell_enabled = not (_cmdline_has_flag("--quell-disabled") or _cmdline_has_flag("--quell-off"))
 	if _cmdline_has_flag("--quell-enabled") or _cmdline_has_flag("--quell-on"):
 		quell_enabled = true
-	# Hard projection (mode-3 temporal low-pass) is the only shipped mitigation path.
-	game_budget_enabled = GAME_BUDGET_DEFAULT_ENABLED
-	game_budget_skip_raw_risk = false
-	game_budget_projection_mode = GAME_BUDGET_PROJECTION_CLOSED_FORM
-	current_frame_solver_enabled = true
 	analyzer = NativeBridgeClass.instantiate_native_analyzer()
 	gpu_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
 	_hp_after_analyzer = NativeBridgeClass.instantiate_native_gpu_analyzer()
@@ -235,9 +205,6 @@ func _ready() -> void:
 	if analyzer == null or gpu_analyzer == null or _hp_after_analyzer == null or gpu_frame_pipeline == null:
 		_build_notice("Quell native core could not be instantiated.\nBuild/load addons/quell_core_native before launching the demo.")
 		return
-	analyzer.hard_projection = _hard_projection
-	mitigation_mode = MITIGATION_MODE_CURRENT_FRAME_ONLY
-	game_budget_policy = GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
 	spatial_sensitivity = SPATIAL_SENSITIVITY_BALANCED
 	contribution_enabled = _default_contribution_enabled()
 	_mode_configs = MODE_CONFIGS.duplicate(true)
@@ -334,18 +301,12 @@ func _start_k64_io() -> void:
 			{"name": "source", "type": "string", "doc": "selected source mode"},
 			{"name": "quell_enabled", "type": "bool", "doc": "whole Quell runtime toggle"},
 			{"name": "mitigation_enabled", "type": "bool", "doc": "UI mitigation toggle"},
-			{"name": "mitigation_mode", "type": "int", "doc": "QuellAnalyzer.MitigationMode enum value"},
 			{"name": "headroom_margin", "type": "float", "doc": "After target slider"},
 			{"name": "max_contrast_compression", "type": "float", "doc": "maximum contrast compression slider"},
 			{"name": "max_brightness_reduction", "type": "float", "doc": "maximum brightness reduction slider"},
 			{"name": "max_feedback_amount", "type": "float", "doc": "maximum temporal feedback slider"},
-			{"name": "local_correction_enabled", "type": "bool", "doc": "local correction toggle"},
 			{"name": "preserve_source_hue", "type": "bool", "doc": "Raw hue reconstruction toggle"},
-			{"name": "current_frame_solver_enabled", "type": "bool", "doc": "CurrentFrame preview solver toggle"},
-			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency game budget mode toggle"},
-			{"name": "game_budget_skip_raw_risk", "type": "bool", "doc": "skip Raw-side risk aggregation in game-budget mode"},
-			{"name": "game_budget_policy_label", "type": "string", "doc": "game-budget filter policy"},
-			{"name": "game_budget_projection_label", "type": "string", "doc": "game-budget projection implementation"},
+			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency performance budget (analysis downscale + frame-gated sampling)"},
 			{"name": "spatial_sensitivity", "type": "int", "doc": "QuellAnalyzer.SpatialSensitivity enum value"},
 			{"name": "render_backend", "type": "string", "doc": "active Quell output backend"},
 			{"name": "display_size", "type": "string", "doc": "current output texture size"},
@@ -360,9 +321,6 @@ func _start_k64_io() -> void:
 	io.call("register_screenshot", "after", Callable(self, "_provide_k64_after_screenshot"))
 	io.call("register_action", "quell_set_mode", Callable(self, "_act_k64_set_mode"), {
 		"args": [{"name": "index", "type": "int"}],
-	})
-	io.call("register_action", "quell_set_policy", Callable(self, "_act_k64_set_policy"), {
-		"args": [{"name": "mode", "type": "int"}],
 	})
 	io.call("register_action", "quell_set_enabled", Callable(self, "_act_k64_set_enabled"), {
 		"args": [{"name": "enabled", "type": "bool"}],
@@ -500,21 +458,12 @@ func _provide_k64_status() -> Dictionary:
 		"source": String(source.get("name", "")),
 		"quell_enabled": quell_enabled,
 		"mitigation_enabled": mitigation_enabled,
-		"mitigation_mode": int(mitigation_mode),
 		"headroom_margin": headroom_margin,
-		"temporal_blend_alpha": temporal_blend_alpha,
 		"max_contrast_compression": max_contrast_compression,
 		"max_brightness_reduction": max_brightness_reduction,
 		"max_feedback_amount": max_feedback_amount,
-		"local_correction_enabled": local_correction_enabled,
 		"preserve_source_hue": preserve_source_hue,
-		"current_frame_solver_enabled": current_frame_solver_enabled,
 		"game_budget_enabled": game_budget_enabled,
-		"game_budget_skip_raw_risk": game_budget_skip_raw_risk,
-		"game_budget_policy": int(game_budget_policy),
-		"game_budget_policy_label": _game_budget_policy_label(),
-		"game_budget_projection_mode": int(game_budget_projection_mode),
-		"game_budget_projection_label": _game_budget_projection_label(),
 		"spatial_sensitivity": int(spatial_sensitivity),
 		"render_backend": _render_backend_label(),
 		"display_size": "%dx%d" % [display_size.x, display_size.y],
@@ -586,13 +535,6 @@ func _act_k64_set_mode(args: Dictionary) -> Dictionary:
 	_apply_mode(int(args.get("index", current_mode)))
 	return _provide_k64_status()
 
-func _act_k64_set_policy(args: Dictionary) -> Dictionary:
-	mitigation_mode = clampi(int(args.get("mode", mitigation_mode)), MITIGATION_MODE_CURRENT_FRAME_ONLY, MITIGATION_MODE_ADAPTIVE)
-	_select_option_by_item_id(mitigation_mode_select, mitigation_mode)
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-	return _provide_k64_status()
-
 func _act_k64_set_enabled(args: Dictionary) -> Dictionary:
 	quell_enabled = bool(args.get("enabled", args.get("value", quell_enabled)))
 	if quell_toggle != null:
@@ -606,13 +548,6 @@ func _act_k64_set_mitigation(args: Dictionary) -> Dictionary:
 	if mitigation_toggle != null:
 		mitigation_toggle.button_pressed = mitigation_enabled
 	_sync_analyzer_settings()
-	_reset_analysis_state()
-	return _provide_k64_status()
-
-func _act_k64_set_temporal_alpha(args: Dictionary) -> Dictionary:
-	temporal_blend_alpha = clamp(float(args.get("alpha", temporal_blend_alpha)), 0.05, 1.0)
-	_sync_analyzer_settings()
-	_refresh_static_labels()
 	_reset_analysis_state()
 	return _provide_k64_status()
 
@@ -640,15 +575,6 @@ func _act_k64_set_feedback_max(args: Dictionary) -> Dictionary:
 	_refresh_static_labels()
 	return _provide_k64_status()
 
-func _act_k64_set_local_correction(args: Dictionary) -> Dictionary:
-	local_correction_enabled = bool(args.get("enabled", args.get("value", local_correction_enabled)))
-	if local_correction_toggle != null:
-		local_correction_toggle.set_pressed_no_signal(local_correction_enabled)
-	_sync_analyzer_settings()
-	if gpu_frame_pipeline != null:
-		gpu_frame_pipeline.reset_output_history()
-	return _provide_k64_status()
-
 func _act_k64_set_hue_preserve(args: Dictionary) -> Dictionary:
 	preserve_source_hue = bool(args.get("enabled", args.get("value", preserve_source_hue)))
 	if hue_preserve_toggle != null:
@@ -658,49 +584,12 @@ func _act_k64_set_hue_preserve(args: Dictionary) -> Dictionary:
 		gpu_frame_pipeline.reset_output_history()
 	return _provide_k64_status()
 
-func _act_k64_set_current_frame_solver(args: Dictionary) -> Dictionary:
-	current_frame_solver_enabled = bool(args.get("enabled", args.get("value", current_frame_solver_enabled)))
-	if current_frame_solver_toggle != null:
-		current_frame_solver_toggle.set_pressed_no_signal(current_frame_solver_enabled)
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-	return _provide_k64_status()
-
 func _act_k64_set_game_budget(args: Dictionary) -> Dictionary:
 	game_budget_enabled = bool(args.get("enabled", args.get("value", game_budget_enabled)))
-	if game_budget_toggle != null:
-		game_budget_toggle.set_pressed_no_signal(game_budget_enabled)
 	if game_budget_enabled and _is_frame_sequence_source(_current_source_config()):
 		_preload_frame_sequence(_current_source_config())
 	_sync_analyzer_settings()
 	_ensure_gpu_frame_pipeline_size(_current_source_config())
-	_reset_analysis_state()
-	return _provide_k64_status()
-
-func _act_k64_set_game_budget_skip_raw_risk(args: Dictionary) -> Dictionary:
-	game_budget_skip_raw_risk = bool(args.get("enabled", args.get("value", game_budget_skip_raw_risk)))
-	if game_budget_skip_raw_risk:
-		game_budget_enabled = true
-	if game_budget_toggle != null:
-		game_budget_toggle.set_pressed_no_signal(game_budget_enabled)
-	if game_budget_skip_raw_risk_toggle != null:
-		game_budget_skip_raw_risk_toggle.set_pressed_no_signal(game_budget_skip_raw_risk)
-	_sync_analyzer_settings()
-	_ensure_gpu_frame_pipeline_size(_current_source_config())
-	_reset_analysis_state()
-	return _provide_k64_status()
-
-func _act_k64_set_game_budget_policy(args: Dictionary) -> Dictionary:
-	game_budget_policy = _parse_game_budget_policy(args.get("policy", args.get("value", game_budget_policy)))
-	_select_option_by_item_id(game_budget_policy_select, int(game_budget_policy))
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-	return _provide_k64_status()
-
-func _act_k64_set_game_budget_projection(args: Dictionary) -> Dictionary:
-	game_budget_projection_mode = _parse_game_budget_projection_mode(args.get("mode", args.get("value", game_budget_projection_mode)))
-	_select_option_by_item_id(game_budget_projection_select, int(game_budget_projection_mode))
-	_sync_analyzer_settings()
 	_reset_analysis_state()
 	return _provide_k64_status()
 
@@ -1015,8 +904,6 @@ func _build_hud() -> void:
 	_add_metric_row(stack, "reduction_ratio", "Drop")
 	_add_metric_row(stack, "brightness_control", "Brightness")
 	_add_metric_row(stack, "contrast_control", "Contrast")
-	_add_metric_row(stack, "feedback_control", "Feedback")
-	_add_metric_row(stack, "local_correction", "Local")
 	_add_metric_row(stack, "mitigation", "Mitigation")
 
 	status_label = Label.new()
@@ -1185,8 +1072,6 @@ func _apply_shader_parameter_metrics(metrics: Dictionary, parameters: Dictionary
 	metrics["temporal_hold"] = 1.0 if float(parameters.get("luminance_delta_limit", 1.0)) <= 0.000001 else 0.0
 	metrics["brightness_control"] = float(parameters.get("brightness_reduction", 0.0))
 	metrics["contrast_control"] = 1.0 - float(parameters.get("contrast_scale_limit", 1.0))
-	metrics["feedback_control"] = 1.0 - float(parameters.get("temporal_blend_alpha", 1.0))
-	metrics["local_correction"] = float(parameters.get("local_correction_strength", 0.0))
 
 func _apply_overlay_metrics_to_shader_parameters(parameters: Dictionary, metrics: Dictionary, output_risk: float) -> void:
 	parameters["raw_risk_for_overlay"] = clampf(float(metrics.get("raw_risk", 0.0)), 0.0, 1.50)
@@ -1205,7 +1090,7 @@ func _resolve_shader_parameters(metrics: Dictionary) -> Dictionary:
 		if analyzer == null or not analyzer.has_method("resolve_shader_parameters"):
 			push_error("Quell analyzer does not provide resolve_shader_parameters; sync/build quell-core first.")
 			return {}
-		parameters = analyzer.resolve_shader_parameters(metrics, {"game_budget": game_budget_enabled})
+		parameters = analyzer.resolve_shader_parameters(metrics)
 	return parameters
 
 func _identity_shader_parameters_for_metrics(metrics: Dictionary) -> Dictionary:
@@ -1283,13 +1168,6 @@ func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
 	metrics["mitigation"] = float(gpu_frame_pipeline.get_last_profile().get("enforcement", 0.0))
 
 func _analyze_raw_source_texture(time_seconds: float) -> Dictionary:
-	if (
-		game_budget_enabled
-		and game_budget_skip_raw_risk
-		and gpu_analyzer != null
-		and gpu_analyzer.has_method("analyze_current_signals")
-	):
-		return gpu_analyzer.analyze_current_signals(gpu_frame_pipeline.analysis_source_texture, time_seconds)
 	return gpu_analyzer.analyze_texture(gpu_frame_pipeline.analysis_source_texture, time_seconds)
 
 func _update_hud(metrics: Dictionary) -> void:
@@ -1313,16 +1191,13 @@ func _update_hud(metrics: Dictionary) -> void:
 	var analysis_size: Vector2i = _analysis_size_for_display(display_size)
 	if gpu_frame_pipeline != null:
 		analysis_size = gpu_frame_pipeline.get_analysis_size()
-	status_label.text = "%s / %s / %s->%s / local %s / hue %s / solver %s / budget %s / %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
+	status_label.text = "%s / %s / %s->%s / hue %s / budget %s / spatial %s / %s / frames %d raw %d after %d / drop %d%% / G %d area %d%% / R %d area %d%% / %s / %s" % [
 		state,
 		_render_backend_label(),
 		"%dx%d" % [display_size.x, display_size.y],
 		"%dx%d" % [analysis_size.x, analysis_size.y],
-		"on" if local_correction_enabled else "off",
 		"raw" if preserve_source_hue else "off",
-		"on" if current_frame_solver_enabled else "off",
-		_game_budget_runtime_label(),
-		_mitigation_mode_label(),
+		"on" if game_budget_enabled else "off",
 		_spatial_sensitivity_label(),
 		String(metrics.get("metric_backend", "generated")),
 		_process_frame_count,
@@ -1362,16 +1237,11 @@ func _sync_analyzer_settings() -> void:
 	analyzer.viewing_distance_m = viewing_distance_m
 	analyzer.headroom_margin = headroom_margin
 	analyzer.mitigation_enabled = quell_enabled and mitigation_enabled
-	analyzer.mitigation_mode = mitigation_mode
-	analyzer.temporal_blend_alpha = temporal_blend_alpha
 	analyzer.max_contrast_compression = max_contrast_compression
 	analyzer.max_brightness_reduction = max_brightness_reduction
 	analyzer.max_feedback_amount = max_feedback_amount
-	analyzer.local_correction_enabled = local_correction_enabled
 	analyzer.preserve_source_hue = preserve_source_hue
 	analyzer.spatial_sensitivity = spatial_sensitivity
-	if _object_has_property(analyzer, "game_budget_policy"):
-		analyzer.game_budget_policy = game_budget_policy
 	_apply_contribution_settings(analyzer)
 	gpu_analyzer.viewing_distance_m = viewing_distance_m
 
@@ -1658,8 +1528,6 @@ func _disabled_metrics(time_seconds: float, source_label: String) -> Dictionary:
 		"mitigation": 0.0,
 		"brightness_control": 0.0,
 		"contrast_control": 0.0,
-		"feedback_control": 0.0,
-		"local_correction": 0.0,
 		"general_flash_count": 0,
 		"red_flash_count": 0,
 		"general_flash_area": 0.0,
@@ -1853,8 +1721,6 @@ func _refresh_static_labels() -> void:
 		distance_value_label.text = "%.2f m" % viewing_distance_m
 	if headroom_value_label != null:
 		headroom_value_label.text = "%d%%" % roundi(headroom_margin * 100.0)
-	if temporal_blend_value_label != null:
-		temporal_blend_value_label.text = "%d%%" % roundi(temporal_blend_alpha * 100.0)
 	if brightness_limit_value_label != null:
 		brightness_limit_value_label.text = "%d%%" % roundi(max_brightness_reduction * 100.0)
 	if contrast_limit_value_label != null:
@@ -1878,32 +1744,16 @@ func _on_quell_toggled(enabled: bool) -> void:
 	_sync_analyzer_settings()
 	_reset_analysis_state()
 
-func _on_mitigation_mode_selected(index: int) -> void:
-	mitigation_mode = mitigation_mode_select.get_item_id(index)
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-
 func _on_spatial_sensitivity_selected(index: int) -> void:
 	spatial_sensitivity = spatial_sensitivity_select.get_item_id(index)
 	_sync_analyzer_settings()
 	_reset_analysis_state()
-
-func _on_local_correction_toggled(enabled: bool) -> void:
-	local_correction_enabled = enabled
-	_sync_analyzer_settings()
-	if gpu_frame_pipeline != null:
-		gpu_frame_pipeline.reset_output_history()
 
 func _on_hue_preserve_toggled(enabled: bool) -> void:
 	preserve_source_hue = enabled
 	_sync_analyzer_settings()
 	if gpu_frame_pipeline != null:
 		gpu_frame_pipeline.reset_output_history()
-
-func _on_current_frame_solver_toggled(enabled: bool) -> void:
-	current_frame_solver_enabled = enabled
-	_sync_analyzer_settings()
-	_reset_analysis_state()
 
 func _on_game_budget_toggled(enabled: bool) -> void:
 	game_budget_enabled = enabled
@@ -1912,60 +1762,6 @@ func _on_game_budget_toggled(enabled: bool) -> void:
 	_sync_analyzer_settings()
 	_ensure_gpu_frame_pipeline_size(_current_source_config())
 	_reset_analysis_state()
-
-func _on_game_budget_skip_raw_risk_toggled(enabled: bool) -> void:
-	game_budget_skip_raw_risk = enabled
-	if game_budget_skip_raw_risk:
-		game_budget_enabled = true
-		if game_budget_toggle != null:
-			game_budget_toggle.set_pressed_no_signal(true)
-	_sync_analyzer_settings()
-	_ensure_gpu_frame_pipeline_size(_current_source_config())
-	_reset_analysis_state()
-
-func _on_game_budget_policy_selected(index: int) -> void:
-	game_budget_policy = game_budget_policy_select.get_item_id(index)
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-
-func _on_game_budget_projection_selected(index: int) -> void:
-	game_budget_projection_mode = game_budget_projection_select.get_item_id(index)
-	_sync_analyzer_settings()
-	_reset_analysis_state()
-
-func _parse_game_budget_policy(value: Variant) -> int:
-	if value is String:
-		var text := String(value).to_lower()
-		if text == "atf" or text == "adaptive" or text == "adaptive_temporal_filter":
-			return GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER
-		return GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS
-	return clampi(int(value), GAME_BUDGET_POLICY_DIRECT_BRIGHTNESS, GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER)
-
-func _parse_game_budget_projection_mode(value: Variant) -> int:
-	if value is String:
-		var text := String(value).to_lower().replace("-", "_")
-		if text == "legacy" or text == "old" or text == "previous":
-			return GAME_BUDGET_PROJECTION_LEGACY
-		return GAME_BUDGET_PROJECTION_CLOSED_FORM
-	return clampi(int(value), GAME_BUDGET_PROJECTION_LEGACY, GAME_BUDGET_PROJECTION_CLOSED_FORM)
-
-func _game_budget_policy_label() -> String:
-	if game_budget_policy == GAME_BUDGET_POLICY_ADAPTIVE_TEMPORAL_FILTER:
-		return "atf"
-	return "direct"
-
-func _game_budget_projection_label() -> String:
-	if game_budget_projection_mode == GAME_BUDGET_PROJECTION_LEGACY:
-		return "legacy"
-	return "closed-form"
-
-func _game_budget_runtime_label() -> String:
-	if not game_budget_enabled:
-		return "off"
-	var label := "%s/%s" % [_game_budget_policy_label(), _game_budget_projection_label()]
-	if game_budget_skip_raw_risk:
-		label += "/raw-off"
-	return label
 
 func _on_frame_sequence_seek_drag_started() -> void:
 	_frame_sequence_seek_dragging = true
@@ -1998,13 +1794,6 @@ func _on_viewing_distance_changed(value: float) -> void:
 	_sync_analyzer_settings()
 	_refresh_static_labels()
 
-func _on_temporal_blend_changed(value: float) -> void:
-	temporal_blend_alpha = value
-	_sync_analyzer_settings()
-	if gpu_frame_pipeline != null:
-		gpu_frame_pipeline.reset_output_history()
-	_refresh_static_labels()
-
 func _on_contrast_limit_changed(value: float) -> void:
 	max_contrast_compression = value
 	_sync_analyzer_settings()
@@ -2024,13 +1813,6 @@ func _on_headroom_changed(value: float) -> void:
 	headroom_margin = value
 	_sync_analyzer_settings()
 	_refresh_static_labels()
-
-func _mitigation_mode_label() -> String:
-	if mitigation_mode == MITIGATION_MODE_CURRENT_FRAME_ONLY:
-		return "current-frame"
-	if mitigation_mode == MITIGATION_MODE_TEMPORAL_BLEND:
-		return "temporal-blend %d%%" % roundi(temporal_blend_alpha * 100.0)
-	return "adaptive"
 
 func _spatial_sensitivity_label() -> String:
 	if spatial_sensitivity == SPATIAL_SENSITIVITY_BALANCED:
