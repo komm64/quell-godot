@@ -124,7 +124,7 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 			continue
 		if out_index < lookahead_hazards.size():
 			projection.set_external_hazard(lookahead_hazards[out_index])
-		var projected: Image = projection.step(analysis_source, time_seconds)
+		var projected: Image = projection.step(analysis_source, time_seconds, 1.0 / _output_fps)
 		_save_png(analysis_source, raw_dir.path_join("frame_%06d.png" % [out_index + 1]))
 		_save_png(projected, after_dir.path_join("frame_%06d.png" % [out_index + 1]))
 
@@ -347,9 +347,12 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 			_failed = true
 			continue
 		var analysis_image := _prepare_analysis_image(source_image, _analysis_size)
-		solver.step(analysis_image, time_seconds)
+		solver.step(analysis_image, time_seconds, 1.0 / _output_fps)
 		var shader_parameters := {
 			"mitigation_mode": 3,
+			# dt normalization: at the default 30 fps output this is exactly one
+			# reference frame (the certified cadence), so the export is unchanged.
+			"delta_seconds": 1.0 / _output_fps,
 			"mitigation_strength": 1.0,
 			"mitigation_enabled_signal": 1.0,
 			"tone_enforced": 1.0 if bool(solver.last_solution.get("enforced", false)) else 0.0,

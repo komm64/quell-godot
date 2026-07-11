@@ -85,8 +85,6 @@ const ENABLE_K64_IO_BY_DEFAULT: bool = false
 const ENABLE_FRAME_SEQUENCE_RAW_SPATIAL_CPU_OVERRIDE: bool = false
 const ENABLE_FRAME_SEQUENCE_AFTER_SPATIAL_READBACK: bool = false
 const HUD_UPDATE_HZ: float = 10.0
-const GAME_BUDGET_RAW_SAMPLE_INTERVAL_FRAMES: int = 2
-const GAME_BUDGET_AFTER_SAMPLE_INTERVAL_FRAMES: int = 1
 const FRAME_SEQUENCE_PRELOAD_LIMIT: int = 96
 const GAME_BUDGET_DEFAULT_ENABLED: bool = true
 const DEBUG_MENU_DEFAULT_ENABLED: bool = false
@@ -150,11 +148,8 @@ var _frame_cache_order: Array[String] = []
 var _frame_sequence_active_id := ""
 var _frame_sequence_index := 0
 var _frame_sequence_accumulator := 0.0
-var _frame_sequence_frame_changed := false
-var _frame_sequence_pending_analysis_delta := 0.0
 var _frame_sequence_seek_dragging := false
 var _frame_sequence_force_frame_changed := false
-var _last_frame_sequence_metrics: Dictionary = {}
 var _last_runtime_metrics: Dictionary = {}
 var _last_after_metrics: Dictionary = {}
 var _last_shader_parameters: Dictionary = {}
@@ -306,7 +301,7 @@ func _start_k64_io() -> void:
 			{"name": "max_brightness_reduction", "type": "float", "doc": "maximum brightness reduction slider"},
 			{"name": "max_feedback_amount", "type": "float", "doc": "maximum temporal feedback slider"},
 			{"name": "preserve_source_hue", "type": "bool", "doc": "Raw hue reconstruction toggle"},
-			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency performance budget (analysis downscale + frame-gated sampling)"},
+			{"name": "game_budget_enabled", "type": "bool", "doc": "low-latency performance budget (analysis downscale)"},
 			{"name": "spatial_sensitivity", "type": "int", "doc": "QuellAnalyzer.SpatialSensitivity enum value"},
 			{"name": "render_backend", "type": "string", "doc": "active Quell output backend"},
 			{"name": "display_size", "type": "string", "doc": "current output texture size"},
@@ -670,44 +665,14 @@ func _process(delta: float) -> void:
 		_ensure_gpu_frame_pipeline_size(source)
 		_profile_add("ensure_us", Time.get_ticks_usec() - ensure_start)
 		var uploaded_sequence_frame := false
-		var analysis_delta := delta
-		var after_analysis_delta := delta
 		var gpu_sequence_image = null
 		if _is_frame_sequence_source(source):
-			_frame_sequence_pending_analysis_delta += max(delta, 0.0)
+			# Mode-3 dynamics are dt-normalized (delta_seconds), so the pipeline runs
+			# every display tick like a real game — no held-frame skip/cadence
+			# synchronizer. A held source frame simply measures no transitions.
 			var load_start := Time.get_ticks_usec()
 			gpu_sequence_image = _load_frame_sequence_image_for_demo(source, delta)
 			_profile_add("load_us", Time.get_ticks_usec() - load_start)
-			if not _frame_sequence_frame_changed and not _last_frame_sequence_metrics.is_empty():
-				var cache_start := Time.get_ticks_usec()
-				metrics = _last_frame_sequence_metrics.duplicate(false)
-				metrics["metric_backend"] = "gpu-frame-seq-cached"
-				_profile_add("cache_us", Time.get_ticks_usec() - cache_start)
-				if not quell_enabled:
-					metrics = _disabled_metrics(elapsed_seconds, "gpu-frame-seq-disabled")
-					_last_runtime_metrics = metrics.duplicate(false)
-					_last_frame_sequence_metrics = metrics.duplicate(false)
-					var disabled_cached_hud_start := Time.get_ticks_usec()
-					_update_hud(metrics)
-					_profile_add("hud_us", Time.get_ticks_usec() - disabled_cached_hud_start)
-					_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
-					_profile_sample()
-					return
-				# Held video frame: the mode-3 output is unchanged, so re-measure it.
-				var held_hp_start := Time.get_ticks_usec()
-				_hp_measure_after(metrics, after_analysis_delta)
-				_last_after_metrics = metrics.duplicate(false)
-				_last_runtime_metrics = metrics.duplicate(false)
-				_last_frame_sequence_metrics = metrics.duplicate(false)
-				_profile_add("after_analyze_us", Time.get_ticks_usec() - held_hp_start)
-				var cached_hud_start := Time.get_ticks_usec()
-				_update_hud(metrics)
-				_profile_add("hud_us", Time.get_ticks_usec() - cached_hud_start)
-				_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
-				_profile_sample()
-				return
-			analysis_delta = max(_frame_sequence_pending_analysis_delta, delta)
-			_frame_sequence_pending_analysis_delta = 0.0
 			if gpu_sequence_image != null:
 				var upload_start := Time.get_ticks_usec()
 				uploaded_sequence_frame = gpu_frame_pipeline.upload_source_image(gpu_sequence_image, false)
@@ -727,8 +692,6 @@ func _process(delta: float) -> void:
 			_last_runtime_metrics = metrics.duplicate(false)
 			_last_after_metrics = metrics.duplicate(false)
 			_last_shader_parameters = shader_parameters.duplicate(false)
-			if uploaded_sequence_frame:
-				_last_frame_sequence_metrics = metrics.duplicate(false)
 			var disabled_hud_start := Time.get_ticks_usec()
 			_update_hud(metrics)
 			_profile_add("hud_us", Time.get_ticks_usec() - disabled_hud_start)
@@ -753,18 +716,14 @@ func _process(delta: float) -> void:
 				_apply_cpu_spatial_override(raw_gpu_metrics, gpu_sequence_image, analyzer)
 				_profile_add("spatial_cpu_us", Time.get_ticks_usec() - spatial_cpu_start)
 		var controller_start := Time.get_ticks_usec()
-		metrics = analyzer.update_from_metrics(raw_gpu_metrics, analysis_delta, elapsed_seconds)
+		metrics = analyzer.update_from_metrics(raw_gpu_metrics, delta, elapsed_seconds)
 		_profile_add("controller_us", Time.get_ticks_usec() - controller_start)
 		metrics["metric_backend"] = "gpu-frame-seq" if uploaded_sequence_frame else "gpu-rd"
 		var shader_start := Time.get_ticks_usec()
-		shader_parameters = _resolve_output_shader_parameters(metrics, after_analysis_delta, "frame_sequence" if uploaded_sequence_frame else "generated")
+		shader_parameters = _resolve_output_shader_parameters(metrics, delta, "frame_sequence" if uploaded_sequence_frame else "generated")
 		_profile_add("shader_us", Time.get_ticks_usec() - shader_start)
-		_apply_mitigation_parameters(_hard_projection_parameters(shader_parameters, metrics), _analyzer_hazard_rid())
-		_hp_measure_after(metrics, after_analysis_delta)
-		if uploaded_sequence_frame:
-			var store_start := Time.get_ticks_usec()
-			_last_frame_sequence_metrics = metrics.duplicate(false)
-			_profile_add("store_us", Time.get_ticks_usec() - store_start)
+		_apply_mitigation_parameters(_hard_projection_parameters(shader_parameters, metrics, delta), _analyzer_hazard_rid())
+		_hp_measure_after(metrics, delta)
 	else:
 		if not quell_enabled:
 			metrics = _disabled_metrics(elapsed_seconds, "generated-disabled")
@@ -778,11 +737,17 @@ func _process(delta: float) -> void:
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
 	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 	_profile_sample()
-	if _process_frame_count >= 130 and OS.get_environment("QUELL_SHOT") != "":
-		var shot_img := get_viewport().get_texture().get_image()
-		if shot_img != null:
-			shot_img.save_png(OS.get_environment("QUELL_SHOT"))
-		get_tree().quit()
+	if OS.get_environment("QUELL_SHOT") != "":
+		# Dev screenshot hook: capture at QUELL_SHOT_FRAME (default 130) and quit,
+		# so a specific clip section (e.g. the flash segment) can be verified.
+		var shot_frame := 130
+		if OS.get_environment("QUELL_SHOT_FRAME") != "":
+			shot_frame = maxi(1, int(OS.get_environment("QUELL_SHOT_FRAME")))
+		if _process_frame_count >= shot_frame:
+			var shot_img := get_viewport().get_texture().get_image()
+			if shot_img != null:
+				shot_img.save_png(OS.get_environment("QUELL_SHOT"))
+			get_tree().quit()
 
 func _build_visual_layers() -> void:
 	var source := _current_source_config()
@@ -1121,10 +1086,14 @@ func _apply_mitigation_parameters(parameters: Dictionary, hazard_rid: RID = RID(
 # with the hard-projection (mode 3, temporal low-pass) params the GPU pass needs:
 # the raw general-transition area drives the native enforcement envelope, and the
 # GPU analyzer's regional hazard texture gates the red cap.
-func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary) -> Dictionary:
+func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary, delta: float) -> Dictionary:
 	var p: Dictionary = parameters.duplicate(false)
 	p["mitigation_mode"] = 3
 	p["mitigation_style"] = 1.0 # STYLE_TEMPORAL_LOWPASS
+	# Real display-tick dt: the native envelope and the shader low-pass rescale
+	# their per-frame constants by it, so per-tick application at any fps matches
+	# the certified per-frame (30 fps export) wall-clock dynamics.
+	p["delta_seconds"] = delta
 	# Drive the native enforcement envelope from the strongest per-frame flashing
 	# signal. The processed general_transition_area alone reads low in the demo's
 	# 60/24 fps loop (throttled/smoothed) — much weaker than the oracle's
@@ -1273,7 +1242,6 @@ func _reset_history_state(reset_graph: bool = true, reset_playback: bool = true)
 	_raw_sample_count = 0
 	_after_sample_count = 0
 	_next_hud_update_time = 0.0
-	_last_frame_sequence_metrics.clear()
 	_last_runtime_metrics.clear()
 	_last_after_metrics.clear()
 	_last_shader_parameters.clear()
@@ -1374,7 +1342,6 @@ func _is_frame_sequence_source(config: Dictionary) -> bool:
 func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
 	var force_changed := _frame_sequence_force_frame_changed
 	_frame_sequence_force_frame_changed = false
-	_frame_sequence_frame_changed = force_changed
 	var source_id := String(config.get("id", ""))
 	var frame_paths: Array = _frame_sequence_paths.get(source_id, [])
 	if frame_paths.is_empty():
@@ -1384,18 +1351,13 @@ func _load_frame_sequence_image_for_demo(config: Dictionary, delta: float):
 		_frame_sequence_active_id = source_id
 		_frame_sequence_index = 0
 		_frame_sequence_accumulator = 0.0
-		_frame_sequence_frame_changed = true
-	else:
-		if not force_changed:
-			_frame_sequence_accumulator += max(delta, 0.0)
-			var frame_duration := 1.0 / fps
-			if _frame_sequence_accumulator >= frame_duration:
-				var advance_count := int(floor(_frame_sequence_accumulator / frame_duration))
-				_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
-				_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
-				_frame_sequence_frame_changed = advance_count > 0
-	if game_budget_enabled and not _frame_sequence_frame_changed:
-		return null
+	elif not force_changed:
+		_frame_sequence_accumulator += max(delta, 0.0)
+		var frame_duration := 1.0 / fps
+		if _frame_sequence_accumulator >= frame_duration:
+			var advance_count := int(floor(_frame_sequence_accumulator / frame_duration))
+			_frame_sequence_index = (_frame_sequence_index + advance_count) % frame_paths.size()
+			_frame_sequence_accumulator = fmod(_frame_sequence_accumulator, frame_duration)
 	var frame_path := String(frame_paths[_frame_sequence_index])
 	return _load_frame_sequence_path(frame_path)
 
@@ -1424,10 +1386,7 @@ func _seek_frame_sequence_to_frame(frame_index: int) -> void:
 	_frame_sequence_active_id = source_id
 	_frame_sequence_index = clamped_index
 	_frame_sequence_accumulator = 0.0
-	_frame_sequence_frame_changed = true
 	_frame_sequence_force_frame_changed = true
-	_frame_sequence_pending_analysis_delta = 0.0
-	_last_frame_sequence_metrics.clear()
 	elapsed_seconds = float(clamped_index) / fps
 	_reset_history_state(true, false)
 	_refresh_frame_sequence_seek_ui()
@@ -1508,10 +1467,7 @@ func _reset_frame_sequence_playback() -> void:
 	_frame_sequence_active_id = ""
 	_frame_sequence_index = 0
 	_frame_sequence_accumulator = 0.0
-	_frame_sequence_frame_changed = false
-	_frame_sequence_pending_analysis_delta = 0.0
 	_frame_sequence_force_frame_changed = false
-	_last_frame_sequence_metrics.clear()
 
 func _disabled_metrics(time_seconds: float, source_label: String) -> Dictionary:
 	return {

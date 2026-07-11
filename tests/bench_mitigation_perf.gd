@@ -47,6 +47,7 @@ func _ready() -> void:
 	_params = {
 		"mitigation_mode": 3, "mitigation_style": 1.0,
 		"general_transition_area": 0.5, "target_risk": 0.8, "safety_margin": 0.9,
+		"delta_seconds": 1.0 / 60.0,  # exercise the dt-normalized (game-cadence) path
 	}
 	_analyzer = GpuAnalyzerClass.new()
 	if not _analyzer.is_ready():
