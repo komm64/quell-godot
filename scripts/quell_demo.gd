@@ -1094,16 +1094,17 @@ func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary, de
 	# their per-frame constants by it, so per-tick application at any fps matches
 	# the certified per-frame (30 fps export) wall-clock dynamics.
 	p["delta_seconds"] = delta
-	# Drive the native enforcement envelope from the strongest per-frame flashing
-	# signal. The processed general_transition_area alone reads low in the demo's
-	# 60/24 fps loop (throttled/smoothed) — much weaker than the oracle's
-	# raw_hazard_area the export uses — so the low-pass under-engages. Take the max
-	# of the transition/flash areas so a genuine flash builds full enforcement.
+	# Drive the native enforcement envelope from the INSTANTANEOUS per-tick
+	# transition areas — the same semantics as the oracle's raw_hazard_area on the
+	# certified export path: energy pumps only on real flash events and starts
+	# easing the moment flashing stops (the leaky integrator supplies the memory).
+	# The 1-second-windowed general/red_flash_area maxima that used to be mixed in
+	# here were a workaround for the held-frame-skip era, when the throttled
+	# analysis smeared the instantaneous area low; with dt-normalized per-tick
+	# application they only added a ~1 s full-enforcement hold past the last event.
 	p["general_transition_area"] = max(
 		float(metrics.get("general_transition_area", 0.0)),
-		float(metrics.get("general_flash_area", 0.0)),
-		float(metrics.get("red_transition_area", 0.0)),
-		float(metrics.get("red_flash_area", 0.0)))
+		float(metrics.get("red_transition_area", 0.0)))
 	p["target_risk"] = 0.80
 	p["safety_margin"] = 0.90
 	return p
