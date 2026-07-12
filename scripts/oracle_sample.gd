@@ -1,11 +1,9 @@
 extends Control
 
-# Live viewer for the hard-projection ORACLE (quell_projection_reference.gd),
-# the CPU reference mitigation. Runs each Pokemon frame through the oracle and
-# shows Raw (left) vs After (right) side by side, so the actually-shipping
-# mitigation can be seen on the benchmark. Toggle RISE_CAP / TEMPORAL_LOWPASS
-# with Space. This is NOT the realtime GPU path (that port is still pending) —
-# it is the oracle itself, the same code the release gate measures green.
+# Side-by-side viewer for the CPU reference mitigation: runs each benchmark
+# frame through the private core's reference solver and shows Raw (left) vs
+# After (right). Toggle the mitigation style with Space. Not the realtime GPU
+# path.
 
 const ProjectionClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
 
@@ -17,7 +15,7 @@ const TARGET_RISK := 0.80
 
 var _paths: PackedStringArray = PackedStringArray()
 var _oracle
-var _style := 1                      # STYLE_TEMPORAL_LOWPASS (default)
+var _style := 1                      # default style preset
 var _out_index := 0
 var _output_frames := 0
 var _play_accum := 0.0
@@ -86,8 +84,8 @@ func _reset_oracle() -> void:
 func _process(delta: float) -> void:
 	if _paths.is_empty() or _paused:
 		return
-	# Advance one output frame per tick (playback speed follows the CPU oracle's
-	# throughput — the oracle's per-pixel work in GDScript is not full 30 fps).
+	# Advance one output frame per tick (playback speed follows the CPU
+	# reference solver's throughput, which is not full 30 fps in GDScript).
 	_step_one()
 
 func _step_one() -> void:
@@ -100,9 +98,9 @@ func _step_one() -> void:
 	var after: Image = _oracle.step(analysis, t)
 	_raw_tex.texture = ImageTexture.create_from_image(analysis)
 	_aft_tex.texture = ImageTexture.create_from_image(after)
-	var style_name := "RISE_CAP" if _style == 0 else "TEMPORAL_LOWPASS"
+	var style_name := "A (sharp)" if _style == 0 else "B (soft)"
 	var pstate := "  [PAUSED]" if _paused else ""
-	_label.text = "Oracle — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
+	_label.text = "Reference — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
 		_out_index + 1, _output_frames, style_name, pstate]
 	_out_index += 1
 	if _out_index >= _output_frames:
@@ -133,9 +131,9 @@ func _input(event: InputEvent) -> void:
 
 func _refresh_label() -> void:
 	if _label != null and _out_index > 0:
-		var style_name := "RISE_CAP" if _style == 0 else "TEMPORAL_LOWPASS"
+		var style_name := "A (sharp)" if _style == 0 else "B (soft)"
 		var pstate := "  [PAUSED]" if _paused else ""
-		_label.text = "Oracle — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
+		_label.text = "Reference — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
 			_out_index, _output_frames, style_name, pstate]
 
 func _list_frames() -> PackedStringArray:

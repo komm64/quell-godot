@@ -1,13 +1,11 @@
 extends SceneTree
 
-# Re-runs the CPU oracle over an already-exported raw frame sequence (the
-# release-gate export's raw/ dir) and dumps the per-frame control series —
-# most importantly the continuous enforcement envelope (= the HUD's
-# "Mitigation strength"). The gate export itself only saves frames and
-# detector metrics; this tool recovers the solver telemetry without
-# re-running the GPU export. Solver configuration mirrors
-# export_mitigated_frame_sequence.gd defaults (lowpass, target 0.80,
-# 256x144 analysis, 30 fps).
+# Re-runs the CPU reference solver over an already-exported raw frame
+# sequence (the release-gate export's raw/ dir) and dumps its per-frame
+# control telemetry (the mitigation-strength drive shown in the HUD). The
+# gate export itself only saves frames and detector metrics; this tool
+# recovers the telemetry without re-running the GPU export. Solver
+# configuration mirrors export_mitigated_frame_sequence.gd defaults.
 #
 # Usage:
 #   godot --headless --path . --script res://tests/export_oracle_control_series.gd \

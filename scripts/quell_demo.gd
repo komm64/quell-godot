@@ -1103,26 +1103,19 @@ func _apply_mitigation_parameters(parameters: Dictionary, hazard_rid: RID = RID(
 	_profile_add("output_apply_us", Time.get_ticks_usec() - mitigate_start)
 	_profile_add_native_pipeline_profile("native_output_apply")
 
-# When --quell-hard-projection is set, replace the legacy heuristic shader params
-# with the hard-projection (mode 3, temporal low-pass) params the GPU pass needs:
-# the raw general-transition area drives the native enforcement envelope, and the
-# GPU analyzer's regional hazard texture gates the red cap.
+# Builds the mode-3 shader parameters the GPU pass needs from the analyzer
+# metrics and the real display-tick dt.
 func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary, delta: float) -> Dictionary:
 	var p: Dictionary = parameters.duplicate(false)
 	p["mitigation_mode"] = 3
-	p["mitigation_style"] = 1.0 # STYLE_TEMPORAL_LOWPASS
-	# Real display-tick dt: the native envelope and the shader low-pass rescale
-	# their per-frame constants by it, so per-tick application at any fps matches
-	# the certified per-frame (30 fps export) wall-clock dynamics.
+	p["mitigation_style"] = 1.0
+	# Real display-tick dt so per-tick application at any fps matches the
+	# certified 30 fps export dynamics.
 	p["delta_seconds"] = delta
-	# Drive the native enforcement envelope from the INSTANTANEOUS per-tick
-	# transition areas — the same semantics as the oracle's raw_hazard_area on the
-	# certified export path: energy pumps only on real flash events and starts
-	# easing the moment flashing stops (the leaky integrator supplies the memory).
-	# The 1-second-windowed general/red_flash_area maxima that used to be mixed in
-	# here were a workaround for the held-frame-skip era, when the throttled
-	# analysis smeared the instantaneous area low; with dt-normalized per-tick
-	# application they only added a ~1 s full-enforcement hold past the last event.
+	# Instantaneous per-tick transition areas — the same input semantics as the
+	# certified export path. (The 1-second-windowed maxima that used to be mixed
+	# in here were a held-frame-skip-era workaround; they only added a ~1 s full
+	# hold past the last event.)
 	p["general_transition_area"] = max(
 		float(metrics.get("general_transition_area", 0.0)),
 		float(metrics.get("red_transition_area", 0.0)))
@@ -1131,9 +1124,8 @@ func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary, de
 	return p
 
 func _analyzer_hazard_rid() -> RID:
-	# Use the temporally-SMOOTHED regional hazard map (fast-attack/slow-release),
-	# not the raw per-frame hazard_texture: the raw one flashes with the source, so
-	# the red cap would engage only on flash frames and flicker red<->grey.
+	# Use the analyzer's temporally-smoothed regional hazard map, not the raw
+	# per-frame mask (the raw one flashes with the source).
 	if gpu_analyzer != null and gpu_analyzer.hazard_map_texture != null:
 		return gpu_analyzer.hazard_map_texture.texture_rd_rid
 	return RID()

@@ -4,6 +4,7 @@ const RuntimeAnalyzerClass = preload("res://addons/quell_core/runtime/quell_anal
 const GpuAnalyzerClass = preload("res://addons/quell_core/runtime/quell_gpu_analyzer.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 const ProjectionReferenceClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
+const LookaheadHazardClass = preload("res://addons/quell_core/runtime/quell_lookahead_hazard.gd")
 const SpatialReferenceClass = preload("res://addons/quell_core/runtime/quell_spatial_reference.gd")
 
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
@@ -29,7 +30,7 @@ var _max_frames := 0
 var _native_enabled := false
 var _hard_projection_enabled := false
 var _oracle_projection_enabled := false
-# Oracle mitigation style: "risecap" (sharp/dark, default) or "lowpass" (bright glow).
+# Mitigation style preset id: "risecap" or "lowpass".
 var _mitigation_style := "lowpass"
 var _regional_luminance := false
 var _lookahead := 0   # buffered-analysis depth (frames) for regional luminance
@@ -83,10 +84,9 @@ func _init() -> void:
 	quit(1 if _failed else 0)
 
 func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
-	# Validates the verified GDScript projection oracle (QuellProjectionReference)
-	# end-to-end against the REAL analyzer. Mitigation runs on CPU at analysis
-	# resolution; saved frames are re-measured by the same analyzer the gate uses.
-	# Not a realtime path — this proves the algorithm before the GPU/native port.
+	# Offline export through the CPU reference solver at analysis resolution;
+	# saved frames are re-measured by the same analyzer the gate uses. Not a
+	# realtime path.
 	_display_size = _analysis_size
 	var duration: float = float(frame_paths.size()) / max(1.0, _source_fps)
 	if _max_seconds > 0.0:
@@ -101,11 +101,9 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 	projection.regional_luminance = _regional_luminance
 	projection.reset()
 
-	# Pass 1 (LOOKAHEAD): prepare every output frame's analysis image and, if a
-	# lookahead depth is set, compute a per-frame regional hazard over a window
-	# that includes FUTURE frames (the buffered-analysis idea). This lets regional
-	# luminance mitigate a fresh flashing region the instant it appears, with no
-	# cut-onset leak, at the cost of the buffer's display delay.
+	# Pass 1: prepare every output frame's analysis image and, if a lookahead
+	# depth is set, precompute the per-frame regional hazard input (the
+	# construction lives in the private core; see QuellLookaheadHazard).
 	var analysis_images: Array = []
 	for out_index in range(output_frames):
 		var t := float(out_index) / _output_fps
@@ -114,7 +112,7 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 		analysis_images.append(_prepare_analysis_image(src, _analysis_size) if src != null else null)
 	var lookahead_hazards: Array = []
 	if _lookahead > 0 and _regional_luminance:
-		lookahead_hazards = _compute_lookahead_hazards(analysis_images, _lookahead)
+		lookahead_hazards = LookaheadHazardClass.compute(analysis_images, _lookahead, _analysis_size)
 
 	for out_index in range(output_frames):
 		var time_seconds := float(out_index) / _output_fps
@@ -171,135 +169,12 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 		"output_root": output_abs,
 	}
 
-# LOOKAHEAD hazard: for each output frame, a per-tile regional hazard computed
-# over a window [frame-depth .. frame+depth] (so it sees future frames). A tile
-# that flashes anywhere in that window is hazardous NOW, which is what removes the
-# cut-onset leak of the causal regional hazard. Matches the oracle's tile grid.
-func _compute_lookahead_hazards(analysis_images: Array, depth: int) -> Array:
-	var W: int = _analysis_size.x
-	var H: int = _analysis_size.y
-	var TS := 16
-	var cols := int(ceil(float(W) / float(TS)))
-	var rows := int(ceil(float(H) / float(TS)))
-	var n := analysis_images.size()
-	const DELTA := 0.10
-	const DARK := 0.80
-	const KNEE := 0.05
-	const FULL := 0.2
-	# Per-frame linear-luma arrays.
-	var lumas: Array = []
-	for f in range(n):
-		var img: Image = analysis_images[f]
-		var la := PackedFloat32Array()
-		la.resize(W * H)
-		if img != null:
-			for y in range(H):
-				for x in range(W):
-					la[y * W + x] = _lin_luma(img.get_pixel(x, y))
-		lumas.append(la)
-	# CONTENT MASK: the letterbox/pillarbox bars are constant black. A tile that is
-	# near-black in EVERY frame is a bar (never flashes, needs no mitigation); the
-	# problem it causes is the blur bleeding its 0-hazard into the adjacent content
-	# tiles, softening the gate at the content edge and leaking a boundary
-	# transition. Flag content tiles (bright in some frame) so the blur ignores bar
-	# tiles as neighbours and the content edge keeps its full hazard.
-	const CONTENT_LUMA := 0.05
-	var is_content := []
-	is_content.resize(cols * rows)
-	for t in range(cols * rows):
-		is_content[t] = false
-	for f in range(n):
-		var la2: PackedFloat32Array = lumas[f]
-		for y in range(H):
-			var tr2 := (y / TS) * cols
-			for x in range(W):
-				if la2[y * W + x] > CONTENT_LUMA:
-					is_content[tr2 + (x / TS)] = true
-	# Per-frame per-tile flashing area (qualifying transition vs previous frame).
-	var flash: Array = []
-	for f in range(n):
-		var fa := PackedFloat32Array()
-		fa.resize(cols * rows)
-		if f > 0:
-			var cur: PackedFloat32Array = lumas[f]
-			var prev: PackedFloat32Array = lumas[f - 1]
-			var cnt := PackedInt32Array()
-			cnt.resize(cols * rows)
-			for y in range(H):
-				var tr := (y / TS) * cols
-				for x in range(W):
-					var i := y * W + x
-					if absf(cur[i] - prev[i]) >= DELTA and minf(cur[i], prev[i]) < DARK:
-						cnt[tr + (x / TS)] += 1
-			for t in range(cols * rows):
-				fa[t] = float(cnt[t]) / float(TS * TS)
-		flash.append(fa)
-	# Windowed (past+future) box sum -> knee/full -> blur.
-	var hazards: Array = []
-	for f in range(n):
-		var raw := PackedFloat32Array()
-		raw.resize(cols * rows)
-		for t in range(cols * rows):
-			var s := 0.0
-			for w in range(maxi(0, f - depth), mini(n, f + depth + 1)):
-				s += float((flash[w] as PackedFloat32Array)[t])
-			raw[t] = clampf((s - KNEE) / (FULL - KNEE), 0.0, 1.0)
-		hazards.append(_blur_tile_grid_masked(raw, cols, rows, is_content))
-	return hazards
-
-func _lin_luma(c: Color) -> float:
-	return _srgb_lin(c.r) * 0.2126 + _srgb_lin(c.g) * 0.7152 + _srgb_lin(c.b) * 0.0722
-
-func _srgb_lin(v: float) -> float:
-	return v / 12.92 if v <= 0.04045 else pow((v + 0.055) / 1.055, 2.4)
-
-# Separable box blur that averages ONLY over content tiles (see is_content): a
-# content tile at the picture edge is not pulled toward the bars' 0 hazard, so its
-# gate stays full and the boundary does not leak. Bar tiles keep their own value
-# (unused — they are black, nothing to mitigate).
-func _blur_tile_grid_masked(field: PackedFloat32Array, cols: int, rows: int, is_content: Array) -> PackedFloat32Array:
-	if cols <= 1 and rows <= 1:
-		return field
-	var current := field.duplicate()
-	for _pass in range(2):
-		var horizontal := current.duplicate()
-		for row in range(rows):
-			for col in range(cols):
-				if not is_content[row * cols + col]:
-					continue
-				var acc := 0.0
-				var num := 0
-				for dc in range(-1, 2):
-					var cc := col + dc
-					if cc < 0 or cc >= cols or not is_content[row * cols + cc]:
-						continue
-					acc += current[row * cols + cc]
-					num += 1
-				if num > 0:
-					horizontal[row * cols + col] = acc / float(num)
-		for row in range(rows):
-			for col in range(cols):
-				if not is_content[row * cols + col]:
-					continue
-				var acc := 0.0
-				var num := 0
-				for dr in range(-1, 2):
-					var rr := row + dr
-					if rr < 0 or rr >= rows or not is_content[rr * cols + col]:
-						continue
-					acc += horizontal[rr * cols + col]
-					num += 1
-				if num > 0:
-					current[row * cols + col] = acc / float(num)
-	return current
-
 func _upload_oracle_hazard(pipeline, solver) -> RID:
 	var cols: int = solver.get_hazard_cols()
 	var rows: int = solver.get_hazard_rows()
 	if cols <= 0 or rows <= 0:
 		return RID()
-	# The GPU red cap consumes the RED-transition hazard field (.r), the same
-	# field the oracle applies in _project_red.
+	# Upload the solver's regional hazard field as the GPU pass's regional input.
 	var field: PackedFloat32Array = solver.get_red_hazard_field()
 	if field.size() < cols * rows:
 		return RID()
@@ -326,12 +201,10 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 		push_error("Failed to configure hard-projection pipeline")
 		_failed = true
 		return {}
-	# The oracle runs as a CPU shadow at analysis resolution: it solves the
-	# per-frame event budget, tone map, and spatial scale, and the GPU pass
-	# (quell_hard_projection.glsl) applies the same solution at display
-	# resolution. Safety does not rest on the shadow being exact — the GPU
-	# finisher clamps against the GPU's own previous-after texture, and the
-	# gate re-measures the saved frames.
+	# The CPU reference solver runs at analysis resolution and supplies the
+	# per-frame parameters the GPU pass applies at display resolution. Safety
+	# does not rest on this shadow being exact — the gate re-measures the
+	# saved frames.
 	var solver = ProjectionReferenceClass.new()
 	solver.target_risk = DEFAULT_TARGET_RISK
 	solver.mitigation_style = ProjectionReferenceClass.STYLE_TEMPORAL_LOWPASS if _mitigation_style == "lowpass" else ProjectionReferenceClass.STYLE_RISE_CAP
@@ -367,9 +240,7 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 			"target_risk": solver.target_risk,
 			"safety_margin": solver.safety_margin,
 		}
-		# Feed the oracle's regional hazard field to the GPU red cap so it caps red
-		# only in flashing regions (mirrors _project_red), instead of greying all
-		# saturated red as the absolute cap did.
+		# Regional hazard input for the GPU pass.
 		var haz_rid := _upload_oracle_hazard(pipeline, solver)
 		pipeline.apply_mitigation(shader_parameters, haz_rid)
 		var clean_after: Image = _read_texture_image(_after_output_texture(pipeline))
@@ -426,8 +297,8 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 	}
 
 func _export_frames(frame_paths: PackedStringArray, raw_dir: String, after_dir: String, output_abs: String) -> Dictionary:
-	# Hard constrained projection (mitigation_mode 3) is the only shipped path; the
-	# oracle projection is the CPU shadow used to validate it. The legacy mode-0/1/2 +
+	# Hard constrained projection (mitigation_mode 3) is the only shipped path;
+	# the CPU reference export validates it offline. The legacy mode-0/1/2 +
 	# game-budget export was removed in the unify-mitigation-path work.
 	if _oracle_projection_enabled:
 		return _export_frames_oracle_projection(frame_paths, raw_dir, after_dir, output_abs)
@@ -620,7 +491,6 @@ func _after_output_texture(pipeline) -> Texture2DRD:
 
 func _configure_after_measurement_analyzer(after_analyzer) -> void:
 	after_analyzer.mitigation_enabled = false
-	after_analyzer.local_correction_enabled = true
 	after_analyzer.spatial_sensitivity = RuntimeAnalyzerClass.SpatialSensitivity.BALANCED
 
 func _measure_visible_after_frame(

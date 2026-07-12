@@ -1,6 +1,6 @@
 extends Node
 
-# Amplification benchmark for the GPU mitigation pass (mode 3 = temporal low-pass).
+# Amplification benchmark for the GPU mitigation pass (mode 3).
 # The pipeline uses the MAIN RenderingDevice, so per-dispatch CPU timing is not the
 # GPU cost. Instead we dispatch the mitigation K times per frame with vsync off and
 # read the average frame time; per-dispatch GPU cost = (t_K - t_0) / K. Run with a
@@ -40,7 +40,7 @@ func _ready() -> void:
 		for x in range(0, _size.x, 4):
 			src.set_pixel(x, y, Color(float(x) / _size.x, float(y) / _size.y, 0.5))
 	_pipeline.upload_source_image(src, false)
-	# Hazard map (16x9) fully hot so the red cap path also runs.
+	# Regional hazard input (16x9) fully hot: worst case, every path runs.
 	var hb := PackedByteArray(); hb.resize(16 * 9); hb.fill(255)
 	var haz := Image.create_from_data(16, 9, false, Image.FORMAT_R8, hb)
 	_haz_rid = _pipeline.upload_hazard_map(haz)
@@ -112,6 +112,6 @@ func _summary() -> void:
 	var mit: float = _config_results.get("mitigate", 0.0)
 	var both: float = _config_results.get("both", 0.0)
 	print("\n=== Full Quell per-frame GPU cost (%dx%d, RTX 2060) ===" % [_size.x, _size.y])
-	print("  mitigate (mode 3 lowpass)  : %.3f ms" % mit)
+	print("  mitigate (mode 3)          : %.3f ms" % mit)
 	print("  analyze (transition+hazard): %.3f ms" % (both - mit))
 	print("  TOTAL analyze+mitigate     : %.3f ms  (budget 1.0 ms)" % both)

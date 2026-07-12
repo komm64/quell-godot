@@ -60,7 +60,6 @@ func _measure_frames(frames: PackedStringArray) -> Dictionary:
 	var gpu = GpuAnalyzerClass.new()
 	var analyzer = AnalyzerClass.new()
 	analyzer.mitigation_enabled = false
-	analyzer.local_correction_enabled = true
 	analyzer.spatial_sensitivity = AnalyzerClass.SpatialSensitivity.BALANCED
 
 	if not pipeline.configure(_display_size, _analysis_size):
