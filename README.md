@@ -2,7 +2,13 @@
 
 Godot binding and demo project for Quell.
 
-Current developer-alpha package version: `0.2.0-developer-alpha`.
+Current developer-alpha package version: `0.3.0-developer-alpha`.
+
+## Links
+
+- Official site: <https://quell.komm64.com>
+- Godot Asset Store: <https://store.godotengine.org/asset/komm64/quell/>
+- Releases (developer-alpha packages): <https://github.com/komm64/quell-godot/releases>
 
 This repository contains the public Godot demo wrapper:
 
@@ -43,8 +49,8 @@ private core installed, it runs the GPU `RenderingDevice` demo:
   development.
 - `QuellRuntime.enabled` is the public runtime control. Other analyzer,
   feedback, sampling, solver, and mitigation-policy settings are internal
-  runtime preset details. Version `0.2.0-developer-alpha` intentionally
-  simplifies the public interface around this enabled-only control.
+  runtime preset details. Developer-alpha packages intentionally keep the
+  public interface to this enabled-only control.
 - HUD graph for Raw, After, and mitigation strength
 - `QuellCompositorEffect`, an optional 3D compositor pass that analyzes the
   actual scene color buffer and applies mitigation before display.
