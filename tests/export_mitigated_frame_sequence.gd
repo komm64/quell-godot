@@ -298,7 +298,9 @@ func _upload_oracle_hazard(pipeline, solver) -> RID:
 	var rows: int = solver.get_hazard_rows()
 	if cols <= 0 or rows <= 0:
 		return RID()
-	var field: PackedFloat32Array = solver.get_hazard_field()
+	# The GPU red cap consumes the RED-transition hazard field (.r), the same
+	# field the oracle applies in _project_red.
+	var field: PackedFloat32Array = solver.get_red_hazard_field()
 	if field.size() < cols * rows:
 		return RID()
 	var bytes := PackedByteArray()
@@ -364,9 +366,6 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 			"general_transition_area": float(solver.last_solution.get("raw_hazard_area", 0.0)),
 			"target_risk": solver.target_risk,
 			"safety_margin": solver.safety_margin,
-			# Instantaneous regional red-flash drive from the oracle; the native
-			# pipeline applies the same dt-decayed hold the oracle uses internally.
-			"red_flash_drive": solver.last_red_flash_drive,
 		}
 		# Feed the oracle's regional hazard field to the GPU red cap so it caps red
 		# only in flashing regions (mirrors _project_red), instead of greying all

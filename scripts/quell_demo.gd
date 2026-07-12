@@ -742,7 +742,7 @@ func _process(delta: float) -> void:
 		if haz_rid.is_valid():
 			var haz_rd := RenderingServer.get_rendering_device()
 			var haz_bytes := haz_rd.texture_get_data(haz_rid, 0)
-			var haz_img := Image.create_from_data(64, 36, false, Image.FORMAT_RG8, haz_bytes)
+			var haz_img := Image.create_from_data(64, 36, false, Image.FORMAT_RGBA8, haz_bytes)
 			haz_img.save_png(OS.get_environment("QUELL_DEBUG_HAZARD") + "_%05d.png" % _process_frame_count)
 	if OS.get_environment("QUELL_DEBUG_TICKS") != "" and _process_frame_count % 30 == 0:
 		print("[dbg] f=%d t=%.2f raw=%.3f out=%.3f mit=%.3f backend=%s" % [
@@ -1128,11 +1128,6 @@ func _hard_projection_parameters(parameters: Dictionary, metrics: Dictionary, de
 		float(metrics.get("red_transition_area", 0.0)))
 	p["target_risk"] = 0.80
 	p["safety_margin"] = 0.90
-	# Regional red-flash drive: the share of the visible saturated red that is
-	# flashing this tick. The native pipeline holds it with a dt-decayed release
-	# so red-on-red motion overlap caps uniformly through a red strobe.
-	var red_sat := float(metrics.get("red_current_area", 0.0))
-	p["red_flash_drive"] = 0.0 if red_sat < 0.005 else clampf(float(metrics.get("red_transition_area", 0.0)) / red_sat, 0.0, 1.0)
 	return p
 
 func _analyzer_hazard_rid() -> RID:
