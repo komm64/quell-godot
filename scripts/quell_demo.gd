@@ -737,6 +737,11 @@ func _process(delta: float) -> void:
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
 	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 	_profile_sample()
+	if OS.get_environment("QUELL_DEBUG_TICKS") != "" and _process_frame_count % 30 == 0:
+		print("[dbg] f=%d t=%.2f raw=%.3f out=%.3f mit=%.3f backend=%s" % [
+			_process_frame_count, elapsed_seconds,
+			float(metrics.get("raw_risk", -9.0)), float(metrics.get("output_risk", -9.0)),
+			float(metrics.get("mitigation", -9.0)), String(metrics.get("metric_backend", "?"))])
 	if OS.get_environment("QUELL_SHOT") != "":
 		# Dev screenshot hook: capture at QUELL_SHOT_FRAME (default 130) and quit,
 		# so a specific clip section (e.g. the flash segment) can be verified.
@@ -1118,20 +1123,25 @@ func _analyzer_hazard_rid() -> RID:
 	return RID()
 
 # SINGLE SOURCE OF TRUTH for the After risk. This is the ONLY writer of
-# metrics["output_risk"]. It scores the risk from the ACTUAL mode-3 output texture
-# (its residual flashing area). If the measurement cannot run, output_risk is left
-# UNWRITTEN (stays the AFTER_RISK_UNMEASURED sentinel) — never a synthesized/raw/
-# estimated value — so "measurement enabled but not measured" surfaces as a visible
-# gap in the display, not a misleading safe 0.
+# metrics["output_risk"]. It scores the ACTUAL mode-3 output texture with the
+# same WINDOWED detector channels the release gate scores (rolling 1-second
+# flash-count risk per WCAG/ITU counting; luminance/red/spatial), so RAW and
+# AFTER read on the same scale. A single safe transition (a burst onset the
+# continuous engage passes by design, or a scene cut) is not a flash pair and
+# barely moves it — the previous instantaneous transition-area/0.25 surface
+# pinned the graph to 1.35 for one tick on exactly those. If the measurement
+# cannot run, output_risk is left UNWRITTEN (stays the AFTER_RISK_UNMEASURED
+# sentinel) — never a synthesized/raw/estimated value — so "measurement enabled
+# but not measured" surfaces as a visible gap, not a misleading safe 0.
 func _hp_measure_after(metrics: Dictionary, delta: float) -> void:
 	var raw_risk: float = float(metrics.get("raw_risk", 0.0))
 	if _hp_after_analyzer == null or not _hp_after_analyzer.is_ready() or gpu_frame_pipeline == null or gpu_frame_pipeline.mitigated_after_texture == null:
 		return
 	var gpu_after: Dictionary = _hp_after_analyzer.analyze_texture(gpu_frame_pipeline.mitigated_after_texture, elapsed_seconds)
-	var trans := float(gpu_after.get("general_transition_area", 0.0))
-	var red_trans := float(gpu_after.get("red_transition_area", 0.0))
-	var spatial := float(gpu_after.get("spatial_pattern_area", 0.0))
-	_measured_after_risk = minf(clampf(max(max(trans, red_trans), spatial) / 0.25, 0.0, 1.5), raw_risk)
+	var luminance := float(gpu_after.get("luminance", 0.0))
+	var red := float(gpu_after.get("red", 0.0))
+	var spatial := float(gpu_after.get("spatial", 0.0))
+	_measured_after_risk = minf(clampf(max(max(luminance, red), spatial), 0.0, 1.35), raw_risk)
 	metrics["output_risk"] = _measured_after_risk
 	# Surface the mode-3 enforcement level as the HUD Mitigation track (the legacy
 	# mitigation_strength is unused on this path, which left the graph pinned at 0).
