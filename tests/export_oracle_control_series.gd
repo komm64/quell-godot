@@ -11,7 +11,13 @@ extends SceneTree
 #
 # Usage:
 #   godot --headless --path . --script res://tests/export_oracle_control_series.gd \
-#       -- --frames-dir <dir with frame_*.png> --out <csv path> [--fps 30]
+#       -- --frames-dir <dir with frame_*.png> --out <csv path> [--fps 30] [--source-fps 23.98]
+#
+# Without --source-fps the frames are assumed to already be at output cadence
+# (an export's raw/ dir). With --source-fps the tool applies the export's
+# source->output resample mapping (floor(t * source_fps)), which makes the run
+# bit-exact against what the export solver saw when pointed at the original
+# source frames.
 
 const ProjectionReferenceClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
 
@@ -22,6 +28,7 @@ func _init() -> void:
 	var frames_dir := ""
 	var out_path := ""
 	var fps := 30.0
+	var source_fps := 0.0
 	var args := OS.get_cmdline_user_args()
 	var i := 0
 	while i < args.size():
@@ -35,6 +42,9 @@ func _init() -> void:
 			"--fps":
 				i += 1
 				fps = float(args[i])
+			"--source-fps":
+				i += 1
+				source_fps = float(args[i])
 		i += 1
 	if frames_dir.is_empty() or out_path.is_empty():
 		push_error("Usage: -- --frames-dir <dir> --out <csv> [--fps 30]")
@@ -68,25 +78,35 @@ func _init() -> void:
 		return
 	csv.store_line("Frame,TimeSeconds,Enforcement,Enforced,RawHazardArea")
 
-	for frame_index in range(frame_paths.size()):
-		var image := Image.new()
-		if image.load(frame_paths[frame_index]) != OK:
-			push_error("Could not load %s" % frame_paths[frame_index])
-			quit(1)
-			return
-		if image.get_format() != Image.FORMAT_RGBA8:
-			image.convert(Image.FORMAT_RGBA8)
-		var time_seconds := float(frame_index) / fps
-		solver.step(_prepare_analysis_image(image, DEFAULT_ANALYSIS_SIZE), time_seconds, 1.0 / fps)
+	var output_count := frame_paths.size()
+	if source_fps > 0.0:
+		output_count = maxi(1, int(floor(float(frame_paths.size()) / source_fps * fps)))
+	var cached_index := -1
+	var cached_image: Image = null
+	for out_index in range(output_count):
+		var time_seconds := float(out_index) / fps
+		var source_index := out_index
+		if source_fps > 0.0:
+			source_index = clampi(int(floor(time_seconds * source_fps)), 0, frame_paths.size() - 1)
+		if source_index != cached_index:
+			cached_image = Image.new()
+			if cached_image.load(frame_paths[source_index]) != OK:
+				push_error("Could not load %s" % frame_paths[source_index])
+				quit(1)
+				return
+			if cached_image.get_format() != Image.FORMAT_RGBA8:
+				cached_image.convert(Image.FORMAT_RGBA8)
+			cached_index = source_index
+		solver.step(_prepare_analysis_image(cached_image, DEFAULT_ANALYSIS_SIZE), time_seconds, 1.0 / fps)
 		csv.store_line("%d,%f,%f,%d,%f" % [
-			frame_index + 1,
+			out_index + 1,
 			time_seconds,
 			float(solver.last_solution.get("enforcement", 0.0)),
 			1 if bool(solver.last_solution.get("enforced", false)) else 0,
 			float(solver.last_solution.get("raw_hazard_area", 0.0)),
 		])
 	csv.close()
-	print("Wrote %d control rows to %s" % [frame_paths.size(), out_path])
+	print("Wrote %d control rows to %s" % [output_count, out_path])
 	quit(0)
 
 # Mirrors export_mitigated_frame_sequence.gd (fit + letterbox on black).
