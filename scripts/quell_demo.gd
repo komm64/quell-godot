@@ -737,6 +737,13 @@ func _process(delta: float) -> void:
 	_profile_add("hud_us", Time.get_ticks_usec() - hud_start)
 	_profile_add("total_us", Time.get_ticks_usec() - profile_total_start)
 	_profile_sample()
+	if OS.get_environment("QUELL_DEBUG_HAZARD") != "" and _process_frame_count % 12 == 0:
+		var haz_rid := _analyzer_hazard_rid()
+		if haz_rid.is_valid():
+			var haz_rd := RenderingServer.get_rendering_device()
+			var haz_bytes := haz_rd.texture_get_data(haz_rid, 0)
+			var haz_img := Image.create_from_data(64, 36, false, Image.FORMAT_RG8, haz_bytes)
+			haz_img.save_png(OS.get_environment("QUELL_DEBUG_HAZARD") + "_%05d.png" % _process_frame_count)
 	if OS.get_environment("QUELL_DEBUG_TICKS") != "" and _process_frame_count % 30 == 0:
 		print("[dbg] f=%d t=%.2f raw=%.3f out=%.3f mit=%.3f backend=%s" % [
 			_process_frame_count, elapsed_seconds,
@@ -745,9 +752,18 @@ func _process(delta: float) -> void:
 	if OS.get_environment("QUELL_SHOT") != "":
 		# Dev screenshot hook: capture at QUELL_SHOT_FRAME (default 130) and quit,
 		# so a specific clip section (e.g. the flash segment) can be verified.
+		# QUELL_SHOT_EVERY=N additionally saves numbered shots every N frames on
+		# the way there (QUELL_SHOT gets _%05d suffixes), for sequence review.
 		var shot_frame := 130
 		if OS.get_environment("QUELL_SHOT_FRAME") != "":
 			shot_frame = maxi(1, int(OS.get_environment("QUELL_SHOT_FRAME")))
+		var shot_every := 0
+		if OS.get_environment("QUELL_SHOT_EVERY") != "":
+			shot_every = maxi(1, int(OS.get_environment("QUELL_SHOT_EVERY")))
+		if shot_every > 0 and _process_frame_count % shot_every == 0 and _process_frame_count < shot_frame:
+			var seq_img := get_viewport().get_texture().get_image()
+			if seq_img != null:
+				seq_img.save_png(OS.get_environment("QUELL_SHOT").get_basename() + "_%05d.png" % _process_frame_count)
 		if _process_frame_count >= shot_frame:
 			var shot_img := get_viewport().get_texture().get_image()
 			if shot_img != null:
