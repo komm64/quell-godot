@@ -2,7 +2,7 @@
 
 Godot binding and demo project for Quell.
 
-Current developer-alpha package version: `0.3.0-developer-alpha`.
+Current developer-alpha package version: `0.3.1-developer-alpha`.
 
 ## Links
 
