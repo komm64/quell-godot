@@ -8,16 +8,15 @@ const LookaheadHazardClass = preload("res://addons/quell_core/runtime/quell_look
 const SpatialReferenceClass = preload("res://addons/quell_core/runtime/quell_spatial_reference.gd")
 
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
-const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
-const DEFAULT_OUTPUT_DIR := "res://validation/private/mitigation/benchmark-quell-after"
+const PrivateData = preload("res://scripts/private_data.gd")
 const DEFAULT_OUTPUT_FPS := 30.0
 const DEFAULT_DISPLAY_SIZE := Vector2i(1280, 720)
 const DEFAULT_ANALYSIS_SIZE := Vector2i(256, 144)
 const DEFAULT_TARGET_RISK := 0.80
 
-var _benchmark: Dictionary = PrivateBenchmark.load_config()
+var _benchmark: Dictionary = PrivateData.load_benchmark()
 var _input_dir: String = _benchmark["frames_dir"]
-var _output_dir := DEFAULT_OUTPUT_DIR
+var _output_dir: String = PrivateData.path("mitigation/benchmark-quell-after")
 var _source_fps: float = _benchmark["fps"]
 var _output_fps := DEFAULT_OUTPUT_FPS
 var _display_size := DEFAULT_DISPLAY_SIZE

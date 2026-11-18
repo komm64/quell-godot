@@ -7,10 +7,10 @@ extends Control
 
 const ProjectionClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
 
-const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
-var FRAME_DIR: String = PrivateBenchmark.load_config()["frames_dir"]
+const PrivateData = preload("res://scripts/private_data.gd")
+var FRAME_DIR: String = PrivateData.load_benchmark()["frames_dir"]
 const ANALYSIS := Vector2i(256, 144)
-var SOURCE_FPS: float = PrivateBenchmark.load_config()["fps"]
+var SOURCE_FPS: float = PrivateData.load_benchmark()["fps"]
 const OUTPUT_FPS := 30.0
 const TARGET_RISK := 0.80
 

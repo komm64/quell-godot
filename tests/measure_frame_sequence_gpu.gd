@@ -7,8 +7,10 @@ const FramePipelineClass = preload("res://addons/quell_core/runtime/quell_gpu_fr
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
 
 var _input_dir: String = ""
-var _output_path: String = "validation/private/mitigation/frame-sequence-gpu-analysis.json"
-var _csv_path: String = "validation/private/mitigation/frame-sequence-gpu-analysis.csv"
+const PrivateData = preload("res://scripts/private_data.gd")
+
+var _output_path: String = PrivateData.path("mitigation/frame-sequence-gpu-analysis.json")
+var _csv_path: String = PrivateData.path("mitigation/frame-sequence-gpu-analysis.csv")
 var _fps: float = 30.0
 var _display_size := Vector2i(1280, 960)
 var _analysis_size := Vector2i(320, 240)

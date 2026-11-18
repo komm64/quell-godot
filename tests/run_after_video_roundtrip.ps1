@@ -3,7 +3,7 @@ param(
     [int]$Fps = 30,
     [string]$Display = "1280x720",
     [string]$Analysis = "256x144",
-    [string]$OutputRoot = "validation/private/after-video-roundtrip/latest",
+    [string]$OutputRoot = $(if ($env:QUELL_DATA_DIR) { Join-Path $env:QUELL_DATA_DIR "quell-godot/after-video-roundtrip/latest" } else { "validation/private/after-video-roundtrip/latest" }),
     [double]$Tolerance = 0.000001
 )
 
