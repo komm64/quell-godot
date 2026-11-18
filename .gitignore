@@ -8,3 +8,4 @@ CLAUDE.md
 *.uid
 validation/private/
 shaders/quell_mitigator.gdshader
+AGENTS.md

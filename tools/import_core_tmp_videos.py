@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -9,7 +10,9 @@ from pathlib import Path
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
-DEFAULT_CORE_TMP = Path(r"C:\Users\komm64\Projects\quell-core\.tmp")
+DEFAULT_CORE_TMP = Path(
+    os.environ.get("QUELL_CORE_DIR") or Path(__file__).resolve().parents[2] / "quell-core"
+) / ".tmp"
 DEFAULT_OUTPUT_ROOT = DEFAULT_CORE_TMP / "quell-godot-sample-frames"
 
 

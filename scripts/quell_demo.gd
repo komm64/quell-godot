@@ -1,9 +1,9 @@
 extends Control
 
-const CORE_TMP_DIR := "C:/Users/komm64/Projects/quell-core/.tmp"
-const CORE_TMP_FRAME_SEQUENCE_DIR := "C:/Users/komm64/Projects/quell-core/.tmp/quell-godot-sample-frames"
+const CORE_TMP_FRAME_SEQUENCE_SUBDIR := ".tmp/quell-godot-sample-frames"
 const TMP_VIDEO_FRAME_MANIFEST := "manifest.json"
 const RiskGraphClass = preload("res://scripts/quell_risk_graph.gd")
+const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
 const SPATIAL_SENSITIVITY_STRICT := 0
@@ -60,20 +60,6 @@ const MODE_CONFIGS: Array[Dictionary] = [
 		"red_amplitude": 0.70,
 		"spatial_contrast": 0.85,
 		"risk_cycle_hz": 0.10,
-		"validation_case_id": "",
-	},
-]
-
-const PRIVATE_FRAME_SEQUENCE_SOURCES: Array[Dictionary] = [
-	{
-		"id": "pokemon_shock_private",
-		"name": "Pokemon shock clip (private)",
-		"source_type": "frame_sequence",
-		"frame_dir": "res://validation/private/demo-videos/pokemon-shock/frames",
-		"frame_prefix": "frame_",
-		"frame_extension": ".png",
-		"fps": 1199.0 / 50.0,
-		"estimated_risk": 1.35,
 		"validation_case_id": "",
 	},
 ]
@@ -180,7 +166,7 @@ func _ready() -> void:
 	Engine.max_fps = 60
 	get_window().title = "[quell-godot] Godot Prototype"
 	if not _load_core_classes():
-		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 C:\\Users\\komm64\\Projects\\quell-core first.")
+		_build_notice("Quell private core is not installed.\nRun tools/sync_private_core.ps1 ../quell-core first.")
 		return
 	_profile_enabled = _cmdline_has_flag("--quell-profile")
 	_legacy_risk_graph_enabled = _cmdline_has_flag("--quell-legacy-risk-graph")
@@ -1270,11 +1256,21 @@ func _reset_history_state(reset_graph: bool = true, reset_playback: bool = true)
 		risk_graph.reset()
 
 func _register_private_frame_sequences() -> void:
-	for source in PRIVATE_FRAME_SEQUENCE_SOURCES:
-		_register_frame_sequence_source(source)
+	var benchmark := PrivateBenchmark.load_config()
+	_register_frame_sequence_source({
+		"id": String(benchmark["id"]),
+		"name": String(benchmark["name"]),
+		"source_type": "frame_sequence",
+		"frame_dir": String(benchmark["frames_dir"]),
+		"frame_prefix": "frame_",
+		"frame_extension": ".png",
+		"fps": float(benchmark["fps"]),
+		"estimated_risk": 1.35,
+		"validation_case_id": "",
+	})
 
 func _register_core_tmp_frame_sequences() -> void:
-	var root_dir := _globalize_demo_path(CORE_TMP_FRAME_SEQUENCE_DIR)
+	var root_dir := PrivateBenchmark.core_dir().path_join(CORE_TMP_FRAME_SEQUENCE_SUBDIR)
 	var dir := DirAccess.open(root_dir)
 	if dir == null:
 		return
