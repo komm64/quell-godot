@@ -10,10 +10,16 @@ from pathlib import Path
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
-DEFAULT_CORE_TMP = Path(
-    os.environ.get("QUELL_CORE_DIR") or Path(__file__).resolve().parents[2] / "quell-core"
-) / ".tmp"
-DEFAULT_OUTPUT_ROOT = DEFAULT_CORE_TMP / "quell-godot-sample-frames"
+_DATA_DIR = os.environ.get("QUELL_DATA_DIR")
+if _DATA_DIR:
+    # Same layout as scripts/private_data.gd: one subfolder per repository.
+    DEFAULT_CORE_TMP = Path(_DATA_DIR) / "quell-core"
+    DEFAULT_OUTPUT_ROOT = Path(_DATA_DIR) / "quell-godot" / "sample-frames"
+else:
+    DEFAULT_CORE_TMP = Path(
+        os.environ.get("QUELL_CORE_DIR") or Path(__file__).resolve().parents[2] / "quell-core"
+    ) / ".tmp"
+    DEFAULT_OUTPUT_ROOT = DEFAULT_CORE_TMP / "quell-godot-sample-frames"
 
 
 def _ffmpeg_exe() -> str:

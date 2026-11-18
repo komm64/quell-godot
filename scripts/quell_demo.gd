@@ -1,9 +1,8 @@
 extends Control
 
-const CORE_TMP_FRAME_SEQUENCE_SUBDIR := ".tmp/quell-godot-sample-frames"
 const TMP_VIDEO_FRAME_MANIFEST := "manifest.json"
 const RiskGraphClass = preload("res://scripts/quell_risk_graph.gd")
-const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
+const PrivateData = preload("res://scripts/private_data.gd")
 const NativeBridgeClass = preload("res://addons/quell_core/runtime/quell_native_bridge.gd")
 
 const SPATIAL_SENSITIVITY_STRICT := 0
@@ -1256,7 +1255,7 @@ func _reset_history_state(reset_graph: bool = true, reset_playback: bool = true)
 		risk_graph.reset()
 
 func _register_private_frame_sequences() -> void:
-	var benchmark := PrivateBenchmark.load_config()
+	var benchmark := PrivateData.load_benchmark()
 	_register_frame_sequence_source({
 		"id": String(benchmark["id"]),
 		"name": String(benchmark["name"]),
@@ -1270,7 +1269,7 @@ func _register_private_frame_sequences() -> void:
 	})
 
 func _register_core_tmp_frame_sequences() -> void:
-	var root_dir := PrivateBenchmark.core_dir().path_join(CORE_TMP_FRAME_SEQUENCE_SUBDIR)
+	var root_dir := PrivateData.sample_frames_dir()
 	var dir := DirAccess.open(root_dir)
 	if dir == null:
 		return
@@ -1520,11 +1519,11 @@ func _load_comparator_baselines() -> void:
 		return
 	for test_case in Array(parsed.get("cases", [])):
 		_comparator_cases[String(test_case.get("id", ""))] = test_case
-	_merge_comparator_results("res://validation/private/comparators/comparator-results.json")
-	_merge_comparator_results("res://validation/private/comparators/peat-results.json")
+	_merge_comparator_results(PrivateData.path("comparators/comparator-results.json"))
+	_merge_comparator_results(PrivateData.path("comparators/peat-results.json"))
 
 func _merge_comparator_results(path: String) -> void:
-	var global_path := ProjectSettings.globalize_path(path)
+	var global_path := _globalize_demo_path(path)
 	if not FileAccess.file_exists(global_path):
 		return
 	var text := FileAccess.get_file_as_string(global_path)
