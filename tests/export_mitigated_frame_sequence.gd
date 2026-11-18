@@ -8,17 +8,17 @@ const LookaheadHazardClass = preload("res://addons/quell_core/runtime/quell_look
 const SpatialReferenceClass = preload("res://addons/quell_core/runtime/quell_spatial_reference.gd")
 
 const CSV_HEADER := "Frame,TimeSeconds,QuellLuminance,QuellRed,QuellSpatial,QuellRawRisk,GeneralFlashCount,RedFlashCount,GeneralFlashArea,RedFlashArea,RedSaturationArea,FrameLuminanceContrast,TemporalLuminanceContrast"
-const DEFAULT_INPUT_DIR := "res://validation/private/demo-videos/pokemon-shock/frames"
-const DEFAULT_OUTPUT_DIR := "res://validation/private/mitigation/pokemon-shock-quell-after"
-const DEFAULT_SOURCE_FPS := 1199.0 / 50.0
+const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
+const DEFAULT_OUTPUT_DIR := "res://validation/private/mitigation/benchmark-quell-after"
 const DEFAULT_OUTPUT_FPS := 30.0
 const DEFAULT_DISPLAY_SIZE := Vector2i(1280, 720)
 const DEFAULT_ANALYSIS_SIZE := Vector2i(256, 144)
 const DEFAULT_TARGET_RISK := 0.80
 
-var _input_dir := DEFAULT_INPUT_DIR
+var _benchmark: Dictionary = PrivateBenchmark.load_config()
+var _input_dir: String = _benchmark["frames_dir"]
 var _output_dir := DEFAULT_OUTPUT_DIR
-var _source_fps := DEFAULT_SOURCE_FPS
+var _source_fps: float = _benchmark["fps"]
 var _output_fps := DEFAULT_OUTPUT_FPS
 var _display_size := DEFAULT_DISPLAY_SIZE
 var _analysis_size := DEFAULT_ANALYSIS_SIZE
@@ -132,8 +132,8 @@ func _export_frames_oracle_projection(frame_paths: PackedStringArray, raw_dir: S
 	var after_stats: Dictionary = _measure_saved_after_sequence(after_dir, after_csv_path)
 
 	var cases := [
-		_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
-		_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
+		_case_manifest("raw", raw_dir, raw_csv_path, output_frames, true),
+		_case_manifest("after", after_dir, after_csv_path, output_frames, false),
 	]
 	var max_after_risk := float(after_stats.get("max_after_risk", 0.0))
 	return {
@@ -258,8 +258,8 @@ func _export_frames_hard_projection(frame_paths: PackedStringArray, raw_dir: Str
 	var after_stats: Dictionary = _measure_saved_after_sequence(after_dir, after_csv_path)
 
 	var cases := [
-		_case_manifest("pokemon_shock_raw", "pokemon_private_raw", raw_dir, raw_csv_path, output_frames, true),
-		_case_manifest("pokemon_shock_after", "pokemon_private_after", after_dir, after_csv_path, output_frames, false),
+		_case_manifest("raw", raw_dir, raw_csv_path, output_frames, true),
+		_case_manifest("after", after_dir, after_csv_path, output_frames, false),
 	]
 	var max_after_risk := float(after_stats.get("max_after_risk", 0.0))
 	return {
@@ -671,12 +671,13 @@ func _metrics_csv_row(frame: int, time_seconds: float, metrics: Dictionary) -> S
 			cells.append(str(value))
 	return ",".join(cells)
 
-func _case_manifest(case_name: String, group: String, frames_dir: String, csv_path: String, frame_count: int, expected_fail) -> Dictionary:
+func _case_manifest(kind: String, frames_dir: String, csv_path: String, frame_count: int, expected_fail) -> Dictionary:
+	var case_name := "%s_%s" % [_benchmark["id"], kind]
 	return {
 		"name": case_name,
 		"id": case_name,
-		"group": group,
-		"source": "pokemon_shock_private",
+		"group": "%s_%s" % [_benchmark["group"], kind],
+		"source": "%s_private" % _benchmark["id"],
 		"frames_dir": frames_dir,
 		"quell_metrics_csv": csv_path,
 		"fps": int(round(_output_fps)),

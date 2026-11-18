@@ -7,9 +7,10 @@ extends Control
 
 const ProjectionClass = preload("res://addons/quell_core/runtime/quell_projection_reference.gd")
 
-const FRAME_DIR := "res://validation/private/demo-videos/pokemon-shock/frames"
+const PrivateBenchmark = preload("res://scripts/private_benchmark.gd")
+var FRAME_DIR: String = PrivateBenchmark.load_config()["frames_dir"]
 const ANALYSIS := Vector2i(256, 144)
-const SOURCE_FPS := 1199.0 / 50.0
+var SOURCE_FPS: float = PrivateBenchmark.load_config()["fps"]
 const OUTPUT_FPS := 30.0
 const TARGET_RISK := 0.80
 
@@ -100,7 +101,7 @@ func _step_one() -> void:
 	_aft_tex.texture = ImageTexture.create_from_image(after)
 	var style_name := "A (sharp)" if _style == 0 else "B (soft)"
 	var pstate := "  [PAUSED]" if _paused else ""
-	_label.text = "Reference — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
+	_label.text = "Reference — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
 		_out_index + 1, _output_frames, style_name, pstate]
 	_out_index += 1
 	if _out_index >= _output_frames:
@@ -133,7 +134,7 @@ func _refresh_label() -> void:
 	if _label != null and _out_index > 0:
 		var style_name := "A (sharp)" if _style == 0 else "B (soft)"
 		var pstate := "  [PAUSED]" if _paused else ""
-		_label.text = "Reference — Pokemon shock — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
+		_label.text = "Reference — frame %d / %d   style: %s%s   [Space]=style  [P]=pause  [.]=step  [R]=restart" % [
 			_out_index, _output_frames, style_name, pstate]
 
 func _list_frames() -> PackedStringArray:
